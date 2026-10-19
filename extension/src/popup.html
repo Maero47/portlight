@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Portlight</title>
+    <link rel="stylesheet" href="./popup/styles.css" />
+  </head>
+  <body>
+    <div class="app" id="app" data-mode="loading">
+      <header class="chrome" id="chrome">
+        <div class="titlebar">
+          <h1 class="title">Portlight</h1>
+          <p class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Looking…</span></p>
+        </div>
+        <div class="search" id="search-wrap">
+          <span class="search-glyph" data-icon="search"></span>
+          <input
+            id="q"
+            type="text"
+            inputmode="search"
+            enterkeyhint="go"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Search, or type a port to check"
+            aria-label="Search ports, or type a port number to check if it is free"
+            aria-controls="rows"
+          />
+          <kbd class="keycap" id="search-hint" aria-hidden="true">⌘K</kbd>
+          <button class="clear" id="clear" type="button" aria-label="Clear search" hidden></button>
+        </div>
+      </header>
+
+      <div class="banner" id="banner" hidden></div>
+      <section class="check" id="check" aria-live="polite" hidden></section>
+
+      <main class="body" id="body">
+        <ul class="rows" id="rows" aria-label="Ports in use"></ul>
+        <div class="state" id="state" hidden></div>
+      </main>
+
+      <footer class="footer" id="footer">
+        <div class="suggest">
+          <span class="suggest-label" id="suggest-label">Free port</span>
+          <button class="suggest-pill" id="suggest" type="button" aria-describedby="suggest-label" disabled>
+            <span class="suggest-port" id="suggest-port">—</span>
+            <span class="suggest-glyph" data-icon="copy"></span>
+          </button>
+        </div>
+        <div class="hints" aria-hidden="true">
+          <span><kbd class="keycap">↑</kbd><kbd class="keycap">↓</kbd> move</span>
+          <span><kbd class="keycap">↩</kbd> open</span>
+        </div>
+      </footer>
+    </div>
+    <div class="sr-only" id="announcer" aria-live="polite"></div>
+    <script type="module" src="./popup/main.ts"></script>
+  </body>
+</html>
