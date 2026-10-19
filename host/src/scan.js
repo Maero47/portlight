@@ -9,6 +9,7 @@ import {
   parseProcNetTcp,
   parseNetstatWin,
   parseTasklist,
+  parsePidPairs,
 } from "./parsers.js";
 
 const MAX_COMMAND = 2000; // keep list responses well under Chrome's 1 MB limit
@@ -64,10 +65,16 @@ function uniquePids(entries) {
   return [...new Set(entries.map((e) => e.pid).filter((p) => Number.isInteger(p) && p > 0))];
 }
 
-async function psDetails(exec, pids) {
+// procps (Linux) prints the numeric uid when a name is wider than the default 8-char
+// column, so ask for a wide one there. BSD/macOS ps has no width syntax and doesn't truncate.
+export function psFormat(platform) {
+  return platform === "linux" ? "pid=,user:64=,lstart=,args=" : "pid=,user=,lstart=,args=";
+}
+
+async function psDetails(exec, pids, platform) {
   if (pids.length === 0) return new Map();
   try {
-    return parsePs(await exec("ps", ["-o", "pid=,user=,lstart=,args=", "-p", pids.join(",")]));
+    return parsePs(await exec("ps", ["-o", psFormat(platform), "-p", pids.join(",")]));
   } catch {
     return new Map();
   }
@@ -96,7 +103,7 @@ async function scanDarwin(exec) {
   if (pids.length === 0) return entries;
   const [cwds, ps] = await Promise.all([
     exec("lsof", ["-a", "-p", pids.join(","), "-d", "cwd", "-Fn"]).then(parseLsofCwd, () => new Map()),
-    psDetails(exec, pids),
+    psDetails(exec, pids, "darwin"),
   ]);
   return merge(entries, ps, cwds);
 }
@@ -163,7 +170,7 @@ async function scanLinux(exec, fsx) {
   }
   const pids = uniquePids(entries);
   if (pids.length === 0) return entries;
-  const [cwds, ps] = await Promise.all([linuxCwds(pids, (p) => fsx.readlink(p)), psDetails(exec, pids)]);
+  const [cwds, ps] = await Promise.all([linuxCwds(pids, (p) => fsx.readlink(p)), psDetails(exec, pids, "linux")]);
   return merge(entries, ps, cwds);
 }
 
@@ -194,11 +201,49 @@ export async function scanListeners({ platform = process.platform, exec = run, f
   return finalize(entries);
 }
 
+/** Unix: numeric uid of a pid (reliable even when `ps` would print a truncated name), or null. */
+export async function processUid(pid, exec = run) {
+  try {
+    // Empty output (pid gone) must not become Number("") === 0, i.e. root.
+    const m = /^\s*(\d+)\s*$/.exec(await exec("ps", ["-o", "uid=", "-p", String(pid)]));
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pids from `pid` up through its ancestors (the host, its launcher shell, the browser, ...).
+ * Unix: `ps -A -o pid=,ppid=`. Windows: Win32_Process via PowerShell (slow, so callers cache it).
+ */
+export async function ancestorPids(pid, { platform = process.platform, exec = run } = {}) {
+  const parent = new Map();
+  try {
+    if (platform === "win32") {
+      const out = await exec(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
+        { timeout: 10000 },
+      );
+      for (const [k, v] of parsePidPairs(out)) parent.set(k, v);
+    } else {
+      for (const [k, v] of parsePidPairs(await exec("ps", ["-A", "-o", "pid=,ppid="]))) parent.set(k, v);
+    }
+  } catch {
+    // fall through with what we know
+  }
+  const chain = new Set();
+  for (let p = pid; p > 0 && !chain.has(p); p = parent.get(p) ?? 0) chain.add(p);
+  return chain;
+}
+
 /** Windows only: the owning user of one pid ("DOMAIN\\user"), or null. */
 export async function windowsProcessUser(pid, exec = run) {
   try {
     const out = await exec("tasklist", ["/V", "/FO", "CSV", "/NH", "/FI", `PID eq ${pid}`]);
-    return parseTasklist(out).get(pid)?.user ?? null;
+    const row = parseTasklist(out).get(pid);
+    if (!row || row.columns < 9) return null; // not the verbose format: can't tell
+    return row.user;
   } catch {
     return null;
   }

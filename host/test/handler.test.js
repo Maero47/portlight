@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler } from "../src/handler.js";
+import { createHandler, sameUser } from "../src/handler.js";
 
 const L = (o) => ({ address: "127.0.0.1", family: "IPv4", process: "node", command: "node x", cwd: "/p", user: "me", startedAt: null, ...o });
 
@@ -26,7 +26,7 @@ function setup(listeners, extra = {}) {
       }
       calls.signal.push([pid, sig]);
     },
-    ownerOf: async (l) => l.user,
+    isMine: async (l) => ({ mine: l.user === "me", owner: l.user }),
     ...extra.deps,
   });
   return { handle, calls };
@@ -104,9 +104,21 @@ test("kill maps OS errors", async () => {
   assert.equal((await b.handle({ id: "e", type: "kill", pid: 10 })).error.code, "not_permitted");
 });
 
-test("Windows-style DOMAIN\\user owner matches the bare username", async () => {
-  const { handle } = setup([L({ port: 3000, pid: 10, user: null })], { deps: { ownerOf: async () => "DESKTOP\\Me" } });
-  assert.equal((await handle({ id: "w", type: "kill", pid: 10 })).ok, true);
+test("sameUser accepts Windows DOMAIN\\user for the bare username", () => {
+  assert.equal(sameUser("DESKTOP\\Me", "me"), true);
+  assert.equal(sameUser("me", "me"), true);
+  assert.equal(sameUser("DESKTOP\\other", "me"), false);
+  assert.equal(sameUser(null, "me"), false);
+});
+
+test("kill refuses every pid in the protected chain (host, launcher, browser)", async () => {
+  const { handle, calls } = setup([L({ port: 9222, pid: 500 }), L({ port: 3000, pid: 10 })], {
+    deps: { protectedPids: async () => new Set([100, 200, 500]) },
+  });
+  const r = await handle({ id: "p", type: "kill", pid: 500 });
+  assert.equal(r.error.code, "not_permitted");
+  assert.equal((await handle({ id: "p2", type: "kill", pid: 10 })).ok, true);
+  assert.deepEqual(calls.signal, [[10, "SIGTERM"]]);
 });
 
 test("malformed requests get bad_request; scan failures get internal", async () => {

@@ -211,8 +211,20 @@ export function parseTasklist(text) {
     const pid = Number(cols[1]);
     if (!Number.isInteger(pid)) continue;
     // Verbose format: Image, PID, Session, Session#, Mem, Status, User Name, CPU Time, Window Title
+    // Session/memory columns are localized but the column order is fixed. A user we can't
+    // read shows as "N/A" (also untranslated); treat it as unknown.
     const user = cols.length >= 9 ? cols[6] : null;
-    map.set(pid, { process: cols[0], user: user && user !== "N/A" ? user : null });
+    map.set(pid, { process: cols[0], user: user && user !== "N/A" ? user : null, columns: cols.length });
   }
   return map;
+}
+
+/** Lines of "<pid> <ppid>" (ps -A -o pid=,ppid= or the PowerShell equivalent) -> [pid, ppid][] */
+export function parsePidPairs(text) {
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+    if (m) out.push([Number(m[1]), Number(m[2])]);
+  }
+  return out;
 }

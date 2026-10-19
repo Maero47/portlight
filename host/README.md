@@ -73,7 +73,7 @@ with `--enable-logging=stderr`.
 | `list`    | every TCP listener with pid, process, command line, cwd, user, start time            |
 | `check`   | `free` per port (max 1000), with the owning listener when known                      |
 | `suggest` | `count` (default 5, max 50) free ports nearest `near` (default 3000), ≥ 1024, skipping Chrome's blocked ports and common service ports (Postgres, Redis, AirPlay 5000/7000, …) |
-| `kill`    | sends TERM (default) or KILL, only to a pid that owns a listening port right now and runs as the current user; never the host or the browser |
+| `kill`    | sends TERM (default) or KILL, only to a pid that owns a listening port right now and runs as the current user (same uid on macOS/Linux, `tasklist /V` owner on Windows). Refuses the host itself and every process above it (launcher shell, browser) |
 
 ## Tests
 

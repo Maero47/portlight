@@ -1,6 +1,6 @@
 // Request validation and dispatch. All OS access goes through `deps` so it can be faked in tests.
 import os from "node:os";
-import { scanListeners, windowsProcessUser } from "./scan.js";
+import { scanListeners, windowsProcessUser, processUid, ancestorPids } from "./scan.js";
 import { probePort, suggestPorts, isValidPort } from "./ports.js";
 import { PROTOCOL_VERSION, HOST_VERSION } from "./protocol.js";
 
@@ -37,30 +37,46 @@ const fail = (code, message) => {
 
 export function currentUser() {
   try {
-    return os.userInfo().username;
+    const { username, uid } = os.userInfo();
+    return { name: username, uid };
   } catch {
-    return null;
+    return { name: null, uid: -1 };
   }
 }
 
+/** tasklist reports "DOMAIN\\user"; os.userInfo() gives the bare name. */
+export function sameUser(owner, me) {
+  if (!owner || !me) return false;
+  const strip = (u) => u.split("\\").pop().toLowerCase();
+  return owner === me || strip(owner) === strip(me);
+}
+
 export function defaultDeps() {
+  const me = currentUser();
+  let ancestors = null;
   return {
     platform: process.platform,
     scan: () => scanListeners(),
     probe: (port) => probePort(port),
     signal: (pid, sig) => process.kill(pid, sig),
-    user: currentUser(),
-    // lsof/ss report the bare username; tasklist reports "DOMAIN\\user".
-    ownerOf: async (listener) =>
-      process.platform === "win32" ? windowsProcessUser(listener.pid) : listener.user,
-    protectedPids: new Set([process.pid, process.ppid]),
+    user: me.name,
+    // Does this pid run as the current user? Unix compares numeric uids, since `ps`
+    // may print a uid or a truncated name for long usernames. Windows asks tasklist /V.
+    isMine: async (listener) => {
+      if (process.platform === "win32") {
+        const owner = await windowsProcessUser(listener.pid);
+        return { mine: sameUser(owner, me.name), owner };
+      }
+      const uid = await processUid(listener.pid);
+      return { mine: uid !== null && uid === me.uid, owner: listener.user ?? (uid !== null ? `uid ${uid}` : null) };
+    },
+    // The host and everything above it: on Windows Chrome starts cmd.exe (the .bat
+    // launcher) which starts node, so process.ppid alone is not the browser.
+    protectedPids: async () => {
+      ancestors ??= ancestorPids(process.pid).catch(() => new Set());
+      return new Set([process.pid, process.ppid, ...(await ancestors)]);
+    },
   };
-}
-
-function sameUser(owner, me) {
-  if (!owner || !me) return false;
-  const strip = (u) => u.split("\\").pop().toLowerCase();
-  return owner === me || strip(owner) === strip(me);
 }
 
 /** Pick the most informative listener when several share a port (prefer ones with a pid). */
@@ -137,13 +153,14 @@ export function createHandler(overrides = {}) {
       const signal = req.signal ?? "TERM";
       if (!Number.isInteger(pid) || pid <= 0) fail("bad_request", "`pid` must be a positive integer");
       if (signal !== "TERM" && signal !== "KILL") fail("bad_request", "`signal` must be TERM or KILL");
-      if (deps.protectedPids.has(pid)) fail("not_permitted", `refusing to kill pid ${pid} (the host or its browser)`);
+      const prot = typeof deps.protectedPids === "function" ? await deps.protectedPids() : deps.protectedPids;
+      if (prot.has(pid)) fail("not_permitted", `refusing to kill pid ${pid} (the host or a process that launched it, e.g. the browser)`);
 
       // Always decide on a fresh scan: the pid must own a listening port right now.
       const owned = (await freshScan()).filter((l) => l.pid === pid);
       if (owned.length === 0) fail("not_found", `pid ${pid} does not own a listening TCP port`);
-      const owner = await deps.ownerOf(owned[0]);
-      if (!sameUser(owner, deps.user)) {
+      const { mine, owner } = await deps.isMine(owned[0]);
+      if (!mine) {
         fail("not_permitted", `pid ${pid} belongs to ${owner ?? "an unknown user"}, not ${deps.user ?? "the current user"}`);
       }
       try {
