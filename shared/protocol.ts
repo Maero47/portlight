@@ -27,8 +27,9 @@ export type TunnelProvider = "cloudflared" | "ngrok";
 export interface Tunnel {
   port: number;
   provider: TunnelProvider;
-  url: string;              // public https URL
+  url: string | null;       // public https URL; null while starting
   startedAt: string;        // ISO
+  state: "starting" | "running"; // starting: the tool hasn't printed its URL yet
 }
 
 export interface LanAddress {

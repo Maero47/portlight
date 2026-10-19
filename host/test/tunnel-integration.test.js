@@ -23,7 +23,8 @@ before(() => {
 const fs = require("node:fs");
 fs.writeFileSync(${JSON.stringify(path.join(dir, "argv.json"))}, JSON.stringify({ argv: process.argv.slice(2), pid: process.pid }));
 process.stderr.write("INF Requesting new quick Tunnel on trycloudflare.com...\\n");
-setTimeout(() => process.stderr.write("INF |  https://fake-quick-tunnel-test.trycloudflare.com  |\\n"), 150);
+// Real quick tunnels take seconds to print their URL; PORTLIGHT_FAKE_CF_DELAY_MS sets how long.
+setTimeout(() => process.stderr.write("INF |  https://fake-quick-tunnel-test.trycloudflare.com  |\\n"), Number(process.env.PORTLIGHT_FAKE_CF_DELAY_MS ?? 150));
 setInterval(() => {}, 1000);
 `,
     { mode: 0o755 },
@@ -106,6 +107,31 @@ test("tunnel lifecycle with a fake cloudflared", { skip: !supported, timeout: 30
     assert.ok(await until(() => !alive(again)), "tunnel stopped with the host");
   } finally {
     host.child.kill();
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test("status during a slow start lists the tunnel as starting, and the link still comes up", { skip: !supported, timeout: 30_000 }, async () => {
+  const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, PORTLIGHT_FAKE_CF_DELAY_MS: "2500" };
+  const server = await listen();
+  const { port } = server.address();
+  const host = startHost(env);
+  try {
+    const pending = host.request({ type: "tunnelStart", port });
+    await new Promise((r) => setTimeout(r, 600));
+    const mid = await host.request({ type: "tunnelStatus" });
+    assert.deepEqual(
+      mid.tunnels.map((t) => [t.port, t.state, t.url]),
+      [[port, "starting", null]],
+    );
+    const started = await pending;
+    assert.equal(started.ok, true, JSON.stringify(started));
+    assert.equal(started.tunnel.state, "running");
+    const after = await host.request({ type: "tunnelStatus" });
+    assert.deepEqual(after.tunnels.map((t) => t.state), ["running"]);
+    await host.request({ type: "tunnelStop", port });
+  } finally {
+    host.child.stdin.end();
     await new Promise((r) => server.close(r));
   }
 });

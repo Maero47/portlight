@@ -57,8 +57,12 @@ export function createTunnelService(opts: {
   const PROVIDERS_TTL_MS = 60_000;
   const setTimer = opts.setTimer ?? ((fn, ms) => setInterval(fn, ms));
   const clearTimer = opts.clearTimer ?? ((t) => clearInterval(t as ReturnType<typeof setInterval>));
-  let conn: { client: HostClient; close: () => void } | null = null;
+  type Conn = { client: HostClient; close: () => void };
+  let conn: Conn | null = null;
   let timer: unknown = null;
+  /** tunnelStart requests in flight, by port. While any is pending the helper must stay: closing it kills the tunnel being born. */
+  const pending = new Map<number, number>();
+  let starting = 0;
 
   const close = () => {
     if (timer !== null) clearTimer(timer);
@@ -67,42 +71,74 @@ export function createTunnelService(opts: {
     conn = null;
   };
 
+  /**
+   * Drop the helper only when it is still the one we asked (a reply can arrive after a
+   * stop + new start replaced it), no start is pending, and it reports no tunnels at all
+   * (the host lists starting tunnels too).
+   */
+  const closeIfIdle = (asked: Conn, tunnels: Tunnel[]) => {
+    if (conn === asked && starting === 0 && tunnels.length === 0) close();
+  };
+
   async function status(checkProviders = false): Promise<TunnelState> {
-    if (!conn) {
+    const c = conn;
+    if (!c) {
       // No live helper means no tunnels; only ask a one-off helper when tools must be checked.
       if (checkProviders && (!providers || now() - providers.at > PROVIDERS_TTL_MS)) {
         providers = { value: (await once.tunnelStatus()).providers, at: now() };
       }
       return { providers: providers?.value ?? null, tunnels: [] };
     }
-    const r = await conn.client.tunnelStatus();
+    const r = await c.client.tunnelStatus();
     providers = { value: r.providers, at: now() };
-    if (r.tunnels.length === 0) close();
-    return { providers: r.providers, tunnels: r.tunnels };
+    closeIfIdle(c, r.tunnels);
+    // The host registers a tunnel only after checking the port; until then our own pending
+    // start is the truth, so every status reply agrees that it is starting.
+    const tunnels = [...r.tunnels];
+    for (const port of pending.keys()) {
+      if (tunnels.some((t) => t.port === port)) continue;
+      const provider: TunnelProvider = r.providers.cloudflared || !r.providers.ngrok ? "cloudflared" : "ngrok";
+      tunnels.push({ port, provider, url: null, startedAt: new Date(now()).toISOString(), state: "starting" });
+    }
+    return { providers: r.providers, tunnels };
   }
 
   async function poll() {
-    if (!conn) return;
+    const c = conn;
+    if (!c) return;
     try {
       await status();
     } catch {
       // The helper went away (and took its tunnels with it): start clean next time.
-      close();
+      // Not while a start is pending — that request fails on its own and cleans up after.
+      if (conn === c && starting === 0) close();
     }
   }
 
   async function handle(op: TunnelOp): Promise<TunnelReply> {
     try {
       if (op.op === "start") {
-        conn ??= live();
+        const c = (conn ??= live());
         if (timer === null) timer = setTimer(() => void poll(), pollMs);
+        const settle = () => {
+          starting--;
+          const n = (pending.get(op.port) ?? 1) - 1;
+          if (n > 0) pending.set(op.port, n);
+          else pending.delete(op.port);
+        };
+        starting++;
+        pending.set(op.port, (pending.get(op.port) ?? 0) + 1);
         try {
-          await conn.client.tunnelStart(op.port);
+          await c.client.tunnelStart(op.port);
         } catch (e) {
+          settle();
           await poll();
           throw e;
         }
+        settle();
       } else if (op.op === "stop") {
+        // A cancelled start is no longer reported as starting; `starting` still keeps the helper until it settles.
+        pending.delete(op.port);
         if (conn) await conn.client.tunnelStop(op.port);
       }
       return { ok: true, ...(await status(op.op === "providers")) };

@@ -3,10 +3,16 @@ import { HostConnectionError, HostRequestError, type HostClient } from "../../sr
 import { createTunnelService, isTunnelMessage } from "../../src/lib/tunnels.ts";
 
 const PROVIDERS = { cloudflared: true, ngrok: false };
-const T = (port: number) => ({ port, provider: "cloudflared" as const, url: `https://p${port}.trycloudflare.com`, startedAt: "t" });
+const T = (port: number) => ({ port, provider: "cloudflared" as const, url: `https://p${port}.trycloudflare.com` as string | null, startedAt: "t", state: "running" as "running" | "starting" });
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
+}
 
 /** A fake helper on a live connection: keeps its own tunnel list like the real host. */
-function fakeLive() {
+function fakeLive(opts: { slow?: Promise<void>; listStarting?: boolean } = {}) {
   const tunnels: ReturnType<typeof T>[] = [];
   const calls: string[] = [];
   let closed = 0;
@@ -15,6 +21,14 @@ function fakeLive() {
     tunnelStart: vi.fn(async (port: number) => {
       calls.push(`start:${port}`);
       if (port === 4444) throw new HostRequestError("internal", "429 Too Many Requests");
+      if (opts.slow) {
+        // Like the host: listed as "starting" (unless it's an older host) until the URL arrives.
+        const t = { ...T(port), url: null, state: "starting" as const };
+        if (opts.listStarting !== false) tunnels.push(t);
+        await opts.slow;
+        if (!tunnels.includes(t) && opts.listStarting !== false) throw new HostRequestError("internal", "stopped before it printed a public URL");
+        if (tunnels.includes(t)) tunnels.splice(tunnels.indexOf(t), 1);
+      }
       tunnels.push(T(port));
       return { tunnel: T(port) };
     }),
@@ -27,8 +41,8 @@ function fakeLive() {
   return { client, calls, tunnels, close: () => void closed++, closed: () => closed };
 }
 
-function setup() {
-  const live = fakeLive();
+function setup(liveOpts: Parameters<typeof fakeLive>[0] = {}) {
+  const live = fakeLive(liveOpts);
   const once = { tunnelStatus: vi.fn(async () => ({ providers: PROVIDERS, tunnels: [] })) } as unknown as HostClient;
   const timers: (() => void)[] = [];
   let made = 0;
@@ -97,6 +111,78 @@ describe("tunnel service (background worker)", () => {
     (live.client.tunnelStart as any).mockRejectedValueOnce(new HostRequestError("bad_request", 'unknown request type: "tunnelStart"'));
     (live.client.tunnelStatus as any).mockRejectedValueOnce(new HostRequestError("bad_request", "unknown"));
     expect(await svc.handle({ op: "start", port: 1 })).toMatchObject({ ok: false, code: "unsupported" });
+  });
+
+  // Regression: status/poll during a pending start used to see no tunnels, close the helper,
+  // and so kill the tunnel that was still waiting for its URL.
+  for (const listStarting of [true, false]) {
+    test(`status and poll while a start is pending keep the helper (host ${listStarting ? "lists" : "doesn't list"} starting tunnels)`, async () => {
+      const gate = deferred();
+      const { svc, live, timers } = setup({ slow: gate.promise, listStarting });
+      const started = svc.handle({ op: "start", port: 5173 });
+      await vi.waitFor(() => expect(live.calls).toEqual(["start:5173"]));
+      for (let i = 0; i < 3; i++) {
+        const st = await svc.handle({ op: "status" });
+        // Starting either way: the host lists it, or the worker fills in its own pending start.
+        expect(st).toMatchObject({ ok: true, tunnels: [{ port: 5173, state: "starting", url: null }] });
+        timers[0]!(); // the worker's 5 s poll
+        await svc.poll();
+      }
+      expect(svc.connected).toBe(true);
+      expect(live.closed()).toBe(0);
+      gate.resolve();
+      expect(await started).toEqual({ ok: true, providers: PROVIDERS, tunnels: [T(5173)] });
+      expect(svc.connected).toBe(true);
+    });
+  }
+
+  test("a poll that fails while a start is pending doesn't close the helper", async () => {
+    const gate = deferred();
+    const { svc, live } = setup({ slow: gate.promise });
+    const started = svc.handle({ op: "start", port: 5173 });
+    await vi.waitFor(() => expect(live.calls).toEqual(["start:5173"]));
+    (live.client.tunnelStatus as any).mockRejectedValueOnce(new HostConnectionError("timeout", "slow"));
+    await svc.poll();
+    expect(live.closed()).toBe(0);
+    gate.resolve();
+    expect((await started).ok).toBe(true);
+  });
+
+  test("cancelling a pending start: the stop goes through, then the idle helper closes", async () => {
+    const gate = deferred();
+    const { svc, live } = setup({ slow: gate.promise });
+    const started = svc.handle({ op: "start", port: 5173 });
+    await vi.waitFor(() => expect(live.calls).toEqual(["start:5173"]));
+    expect(await svc.handle({ op: "stop", port: 5173 })).toMatchObject({ ok: true, tunnels: [] });
+    expect(svc.connected).toBe(true); // the start is still settling
+    gate.resolve();
+    expect(await started).toMatchObject({ ok: false });
+    expect(svc.connected).toBe(false);
+    expect(live.closed()).toBe(1);
+  });
+
+  test("a late status reply from a replaced helper never closes the new one", async () => {
+    const { svc, live } = setup();
+    await svc.handle({ op: "start", port: 5173 });
+    // A status call is in flight on helper A when the last link stops and a new start begins.
+    let release!: (v: unknown) => void;
+    (live.client.tunnelStatus as any).mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const lateStatus = svc.handle({ op: "status" });
+    await svc.handle({ op: "stop", port: 5173 });
+    expect(svc.connected).toBe(false);
+    const gate = deferred();
+    (live.client.tunnelStart as any).mockImplementationOnce(async (port: number) => {
+      await gate.promise;
+      live.tunnels.push(T(port));
+      return { tunnel: T(port) };
+    });
+    const next = svc.handle({ op: "start", port: 3000 });
+    release({ providers: PROVIDERS, tunnels: [] });
+    await lateStatus;
+    expect(svc.connected).toBe(true);
+    gate.resolve();
+    expect((await next).ok).toBe(true);
+    expect(svc.connected).toBe(true);
   });
 
   test("message guard", () => {

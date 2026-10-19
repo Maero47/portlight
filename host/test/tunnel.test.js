@@ -79,10 +79,13 @@ test("error lines are turned into something a person can act on", () => {
 test("start resolves with the public URL; a second start for the port reuses it", async () => {
   const { mgr, spawned } = setup();
   const p = mgr.start(5173, "127.0.0.1");
-  assert.deepEqual(mgr.list(), [], "not listed until it has a URL");
+  // Listed while starting, so a client polling status never mistakes it for "nothing running".
+  assert.deepEqual(mgr.list(), [{ port: 5173, provider: "cloudflared", url: null, startedAt: "2026-01-02T03:04:05.000Z", state: "starting" }]);
   spawned[0].child.stderr.write(CF_BANNER);
   const t = await p;
-  assert.deepEqual(t, { port: 5173, provider: "cloudflared", url: "https://seasonal-deck-organisms-sf.trycloudflare.com", startedAt: "2026-01-02T03:04:05.000Z" });
+  assert.deepEqual(t, {
+    port: 5173, provider: "cloudflared", url: "https://seasonal-deck-organisms-sf.trycloudflare.com", startedAt: "2026-01-02T03:04:05.000Z", state: "running",
+  });
   assert.equal(spawned[0].file, "/bin/cloudflared");
   assert.deepEqual(await mgr.start(5173, "127.0.0.1"), t);
   assert.equal(spawned.length, 1);
@@ -95,6 +98,32 @@ test("IPv6 targets are bracketed", async () => {
   assert.equal(spawned[0].args[1], "http://[::1]:3000");
   spawned[0].child.stdout.write("t=1 lvl=info msg=\"started tunnel\" url=https://x.ngrok-free.app\n");
   assert.equal((await p).provider, "ngrok");
+});
+
+test("stopping a tunnel that is still starting rejects its start and lists nothing", async () => {
+  const { mgr, spawned } = setup();
+  const p = mgr.start(3000, "127.0.0.1");
+  assert.equal(mgr.list()[0].state, "starting");
+  assert.equal(mgr.stop(3000), true);
+  await assert.rejects(p, { code: "internal" });
+  assert.deepEqual(mgr.list(), []);
+  assert.deepEqual(spawned[0].child.signals, ["SIGTERM"]);
+});
+
+test("a stopped tunnel's late exit never removes a newer tunnel on the same port", async () => {
+  const { mgr, spawned } = setup();
+  const a = mgr.start(3000, "127.0.0.1");
+  spawned[0].child.stderr.write(CF_BANNER);
+  await a;
+  // Stop, then start again before the old process has reported its exit.
+  spawned[0].child.kill = (sig) => (spawned[0].child.signals.push(sig), true);
+  mgr.stop(3000);
+  const b = mgr.start(3000, "127.0.0.1");
+  spawned[0].child.emit("exit", null, "SIGTERM");
+  assert.equal(mgr.list().length, 1, "the new tunnel is still there");
+  spawned[1].child.stderr.write(CF_BANNER);
+  assert.equal((await b).state, "running");
+  mgr.stopAll();
 });
 
 test("stop terminates the process and forgets the tunnel", async () => {

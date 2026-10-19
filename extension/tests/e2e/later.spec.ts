@@ -265,3 +265,14 @@ test("tabs on [::1] and *.localhost link to their ports", async ({ page }) => {
   await expect(page.locator('li.row[data-key^="5173:"] .tabs')).toHaveText("1 tab");
   await expect(page.locator('li.row[data-key^="8000:"] .tabs')).toHaveText("1 tab");
 });
+
+test("a link still starting (begun in an earlier popup) shows as being created, not as Public", async ({ page }) => {
+  await openPopup(page, { tunnel: { running: [{ port: 5173, url: null, state: "starting" }] } });
+  const row = page.locator('li.row[data-key^="5173:"]');
+  await expect(page.locator("li.row")).toHaveCount(10);
+  await expect(row.locator(".shared")).toHaveCount(0);
+  await row.click({ button: "right" });
+  await page.locator("#menu").getByRole("menuitem", { name: "Public Link…" }).click();
+  await expect(row.locator(".confirm-text")).toHaveText("Creating a public link… This takes a few seconds.");
+  await expect(row.getByRole("button", { name: "Create Link" })).toHaveCount(0);
+});

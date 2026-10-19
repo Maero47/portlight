@@ -73,10 +73,15 @@ export function createTunnelManager({
     return out;
   }
 
-  const view = (t) => ({ port: t.port, provider: t.provider, url: t.url, startedAt: t.startedAt });
+  const view = (t) => ({ port: t.port, provider: t.provider, url: t.url, startedAt: t.startedAt, state: t.url ? "running" : "starting" });
 
+  /**
+   * Every tunnel this host owns, including ones still waiting for their URL ("starting").
+   * Clients decide whether to keep the helper alive from this list, so a starting tunnel
+   * must never look like "nothing running".
+   */
   function list() {
-    return [...tunnels.values()].filter((t) => t.url).map(view);
+    return [...tunnels.values()].map(view);
   }
 
   function kill(t) {

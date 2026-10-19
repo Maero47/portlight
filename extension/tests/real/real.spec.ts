@@ -33,6 +33,7 @@ const servers: Record<"vite" | "api" | "docs", Server> = {} as never;
 // A stand-in for cloudflared on PATH: prints a quick-tunnel URL, records its argv and pid, runs until stopped.
 let fakeBin: string;
 const FAKE_URL = "https://real-e2e-quick-tunnel.trycloudflare.com";
+const FAKE_DELAY_MS = 6000;
 const fakeRun = () => JSON.parse(readFileSync(join(fakeBin, "run.json"), "utf8")) as { argv: string[]; pid: number };
 const alive = (pid: number) => {
   try {
@@ -63,13 +64,16 @@ test.beforeAll(async () => {
     join(fakeBin, "cloudflared"),
     `#!${process.execPath}
 require("node:fs").writeFileSync(${JSON.stringify(join(fakeBin, "run.json"))}, JSON.stringify({ argv: process.argv.slice(2), pid: process.pid }));
-process.stderr.write("INF |  ${FAKE_URL}  |\\n");
+process.stderr.write("INF Requesting new quick Tunnel on trycloudflare.com...\\n");
+setTimeout(() => process.stderr.write("INF |  ${FAKE_URL}  |\\n"), Number(process.env.PORTLIGHT_FAKE_CF_DELAY_MS ?? 0));
 setInterval(() => {}, 1000);
 `,
     { mode: 0o755 },
   );
   // Chromium passes its environment to the native host, which looks for cloudflared on PATH.
   process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH}`;
+  // Slower than the popup's 2 s refresh and the worker's 5 s poll, like a real quick tunnel.
+  process.env.PORTLIGHT_FAKE_CF_DELAY_MS = String(FAKE_DELAY_MS);
   ({ context, worker, id } = await launch(installed.userDataDir));
   page = await context.newPage();
   // Chrome logs refused/failed fetches (favicon lookups) itself; JS cannot silence those.
@@ -197,11 +201,24 @@ test("open on phone uses the host's real LAN address, or explains why not", asyn
 });
 
 test("share link: created through the background worker, survives the popup closing, stops on request", async () => {
+  test.setTimeout(60_000);
   const api = row(servers.api.port);
   await api.click({ button: "right" });
   await page.locator("#menu").getByRole("menuitem", { name: "Share Public Link…" }).click();
   await expect(api.locator(".explain-lead")).toHaveText("Anyone with the link can open this server.");
   await api.getByRole("button", { name: "Create Link" }).click();
+  await expect(api.locator(".confirm-text")).toHaveText("Creating a public link… This takes a few seconds.");
+  // While the URL is pending, status questions (popup refreshes, the worker's poll) must see it
+  // as starting, and must not close the helper that owns it.
+  const states: string[] = [];
+  const t0 = Date.now();
+  while (Date.now() - t0 < FAKE_DELAY_MS - 1000) {
+    const st = await page.evaluate(() => chrome.runtime.sendMessage({ type: "portlight:tunnel", op: "status" }));
+    states.push(st.tunnels.map((t: any) => `${t.port}:${t.state}`).join() || "none");
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  expect(states.length).toBeGreaterThan(4);
+  expect(new Set(states)).toEqual(new Set([`${servers.api.port}:starting`]));
   await expect(api.locator(".url-line code")).toHaveText(FAKE_URL, { timeout: 15_000 });
   await expect(api.locator(".shared")).toHaveText("Public");
   const run = fakeRun();

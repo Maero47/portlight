@@ -687,13 +687,20 @@ async function refreshTunnels() {
   const seq = ++tunnelSeq;
   const r = await tunnelRequest({ op: "status" });
   if (seq !== tunnelSeq || !r.ok) return;
-  const before = state.tunnels.map((t) => t.url).join();
+  const sig = () => state.tunnels.map((t) => `${t.port}:${t.state}:${t.url}`).join();
+  const before = sig();
   applyTunnelReply(r);
-  if (before !== state.tunnels.map((t) => t.url).join()) render();
+  if (before !== sig()) render();
 }
 
-function tunnelFor(port: number): Tunnel | undefined {
-  return state.tunnels.find((t) => t.port === port);
+/** The running share link on `port` (it has a URL). */
+function tunnelFor(port: number): (Tunnel & { url: string }) | undefined {
+  return state.tunnels.find((t): t is Tunnel & { url: string } => t.port === port && t.state === "running" && !!t.url);
+}
+
+/** A link is being created on `port`: by this popup, or one that was open before it (the worker owns it). */
+function shareStarting(port: number): boolean {
+  return state.sharing.has(port) || state.tunnels.some((t) => t.port === port && t.state === "starting");
 }
 
 async function openShare(key: string) {
@@ -759,7 +766,7 @@ function idleRows(): PortRow[] {
       !r.container &&
       !r.known?.noQuit &&
       !hiddenReason(r, state.settings) &&
-      !tunnelFor(r.port) &&
+      !state.tunnels.some((t) => t.port === r.port) &&
       isIdle(r, tabsFor(r.port).length, state.settings.idleAfterHours);
     // One entry per process (a server on two ports is quit once).
     if (!ok || seen.has(r.pid!)) return false;
@@ -1096,7 +1103,7 @@ function shareHtml(r: PortRow): string {
       <p>Anyone with the link can open this server. Sharing stops when you stop it, when the server quits, or when ${browser} closes.</p></div>
       <div class="confirm-row end"><button class="btn" type="button" data-act="stop-share">Stop Sharing</button><button class="btn" type="button" data-act="cancel">Done</button></div>`;
   }
-  if (state.sharing.has(port)) {
+  if (shareStarting(port)) {
     return `<div class="confirm-row"><span class="confirm-text">Creating a public link… This takes a few seconds.</span><button class="btn" type="button" data-act="stop-share">Cancel</button></div>`;
   }
   if (err) {
@@ -1646,7 +1653,7 @@ function menuItems(r: PortRow): MenuItem[][] {
   if (canShare(r)) {
     sections.push([
       { act: "m-phone", label: "Open on Phone…" },
-      { act: "m-share", label: tunnelFor(r.port) ? "Public Link…" : "Share Public Link…" },
+      { act: "m-share", label: state.tunnels.some((t) => t.port === r.port) ? "Public Link…" : "Share Public Link…" },
     ]);
   }
   if (r.source === "host" && r.pid && state.mode === "host" && !r.container) {

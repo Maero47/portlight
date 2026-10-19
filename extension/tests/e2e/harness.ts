@@ -37,8 +37,8 @@ export interface MockOptions {
 }
 export interface MockTunnel {
   providers?: { cloudflared: boolean; ngrok: boolean };
-  /** Already running when the popup opens. */
-  running?: { port: number; url: string }[];
+  /** Already running (or still starting, url null) when the popup opens. */
+  running?: { port: number; url: string | null; state?: "starting" | "running" }[];
   /** start: answer with this URL (default), or fail with this message. */
   startError?: string;
   startDelayMs?: number;
@@ -250,7 +250,7 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
   runtime.openOptionsPage = async () => void ((window as any).__optionsOpened += 1);
   // The background worker's share-link service, as the popup sees it through sendMessage.
   const providers = tunnel.providers ?? { cloudflared: true, ngrok: false };
-  let running = (tunnel.running ?? []).map((t) => ({ ...t, provider: "cloudflared", startedAt: new Date(now).toISOString() }));
+  let running = (tunnel.running ?? []).map((t) => ({ state: "running", ...t, provider: "cloudflared", startedAt: new Date(now).toISOString() }));
   const tunnelMsgs: any[] = [];
   (window as any).__tunnelMsgs = tunnelMsgs;
   runtime.sendMessage = async (msg: any) => {
@@ -259,7 +259,10 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
     if (msg.op === "start") {
       await new Promise((r) => setTimeout(r, tunnel.startDelayMs ?? 30));
       if (tunnel.startError) return { ok: false, code: "internal", message: tunnel.startError };
-      running = [...running, { port: msg.port, url: "https://quiet-harbor-lights.trycloudflare.com", provider: "cloudflared", startedAt: new Date().toISOString() }];
+      running = [
+        ...running,
+        { port: msg.port, url: "https://quiet-harbor-lights.trycloudflare.com", state: "running", provider: "cloudflared", startedAt: new Date().toISOString() },
+      ];
     } else if (msg.op === "stop") {
       running = running.filter((t) => t.port !== msg.port);
     }
