@@ -1,0 +1,32 @@
+// Message contract between the Chrome extension and the native messaging host.
+// Host name: "com.portlight.host". Transport: Chrome native messaging (JSON, length-prefixed).
+
+export const HOST_NAME = "com.portlight.host";
+export const PROTOCOL_VERSION = 1;
+
+export type Request =
+  | { id: string; type: "ping" }
+  | { id: string; type: "list" }                                  // all TCP listeners on this machine
+  | { id: string; type: "check"; ports: number[] }               // is each port free?
+  | { id: string; type: "suggest"; near?: number; count?: number } // free ports, closest to `near`
+  | { id: string; type: "kill"; pid: number; signal?: "TERM" | "KILL" };
+
+export interface Listener {
+  port: number;
+  address: string;          // "127.0.0.1", "::1", "0.0.0.0", "*", ...
+  family: "IPv4" | "IPv6";
+  pid: number | null;
+  process: string | null;   // short command name, e.g. "node"
+  command: string | null;   // full command line when available
+  cwd: string | null;       // working directory of the process when available (project hint)
+  user: string | null;
+  startedAt: string | null; // ISO time when available
+}
+
+export type Response =
+  | { id: string; ok: true; type: "pong"; version: number; platform: string; hostVersion: string }
+  | { id: string; ok: true; type: "list"; listeners: Listener[]; scannedAt: string }
+  | { id: string; ok: true; type: "check"; results: { port: number; free: boolean; listener?: Listener }[] }
+  | { id: string; ok: true; type: "suggest"; ports: number[] }
+  | { id: string; ok: true; type: "kill"; pid: number }
+  | { id: string; ok: false; error: { code: "bad_request" | "not_permitted" | "not_found" | "internal"; message: string } };
