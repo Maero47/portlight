@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { classifyNativeError, HostClient, HostConnectionError, HostRequestError, portTransport, type Transport } from "../../src/lib/host.ts";
+import { classifyNativeError, HostClient, HostConnectionError, HostRequestError, isUnsupported, portTransport, type Transport } from "../../src/lib/host.ts";
 
 describe("classifyNativeError", () => {
   it.each([
@@ -127,5 +127,37 @@ describe("portTransport", () => {
     expect(ports[0]!.disconnected).toBe(true);
     await expect(c.ping()).resolves.toMatchObject({ type: "pong" });
     expect(ports).toHaveLength(2);
+  });
+});
+
+describe("newer requests", () => {
+  it("kill signals the whole process tree by default", async () => {
+    const seen: any[] = [];
+    const t: Transport = async (m) => {
+      seen.push(m);
+      return { id: m.id, ok: true, type: "kill", pid: 5 };
+    };
+    await new HostClient(t).kill(5);
+    await new HostClient(t).kill(5, "KILL", false);
+    expect(seen.map(({ id, ...rest }) => rest)).toEqual([
+      { type: "kill", pid: 5, signal: "TERM", tree: true },
+      { type: "kill", pid: 5, signal: "KILL", tree: false },
+    ]);
+  });
+  it("reveal and openEditor send the pid (and editor)", async () => {
+    const seen: any[] = [];
+    const t: Transport = async (m) => {
+      seen.push(m);
+      return m.type === "reveal" ? { id: m.id, ok: true, type: "reveal", path: "/p" } : { id: m.id, ok: true, type: "openEditor", path: "/p" };
+    };
+    expect((await new HostClient(t).reveal(7)).path).toBe("/p");
+    expect((await new HostClient(t).openEditor(7, "zed")).path).toBe("/p");
+    expect(seen.map(({ id, ...rest }) => rest)).toEqual([{ type: "reveal", pid: 7 }, { type: "openEditor", pid: 7, editor: "zed" }]);
+  });
+  it("an older host's bad_request counts as unsupported", async () => {
+    const t: Transport = async (m) => ({ id: m.id, ok: false, error: { code: "bad_request", message: 'unknown request type: "reveal"' } });
+    const err = await new HostClient(t).reveal(1).catch((e) => e);
+    expect(isUnsupported(err)).toBe(true);
+    expect(isUnsupported(new HostRequestError("not_found", "x"))).toBe(false);
   });
 });

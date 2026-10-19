@@ -1,6 +1,13 @@
 import { icon } from "./icons.ts";
-import { HostClient, HostConnectionError, HostRequestError, portTransport, type HostFailure } from "../lib/host.ts";
-import { installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
+import {
+  HostClient,
+  HostConnectionError,
+  HostRequestError,
+  isUnsupported,
+  portTransport,
+  type HostFailure,
+} from "../lib/host.ts";
+import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
 import {
   busyPortCount,
   describeScope,
@@ -13,6 +20,18 @@ import {
 } from "../lib/shape.ts";
 import { describeUptime, formatUptime, plural, summary } from "../lib/format.ts";
 import { COMMON_DEV_PORTS, probePort, probePorts, probeToRow } from "../lib/probe.ts";
+import { GROUP_LABEL, GROUP_ORDER } from "../lib/classify.ts";
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  normalizeSettings,
+  onSettingsChanged,
+  saveSettings,
+  type Editor,
+  type Settings,
+} from "../lib/settings.ts";
+import { badgeCount, bestTab, hiddenReason, isIdle, type HiddenReason, type TabRef } from "../lib/view.ts";
+import { closeTabs, focusTab, localTabs, watchTabs } from "../lib/tabs.ts";
 import type { Listener } from "../../../shared/protocol.ts";
 
 type Mode = "loading" | "host" | "missing" | "fallback" | "error";
@@ -20,7 +39,8 @@ type CheckState = "free" | "used" | "pending" | "unknown";
 
 interface Confirm {
   key: string;
-  phase: "ask" | "pending" | "stuck" | "error";
+  /** ask/pending/stuck: the Quit flow. info: what this is and why Quit is replaced. notice: a short message. */
+  phase: "ask" | "pending" | "stuck" | "error" | "info" | "notice";
   message?: string;
 }
 
@@ -30,10 +50,15 @@ interface Check {
   row?: PortRow;
 }
 
-const REFRESH_MS = 2000;
+type Item =
+  | { kind: "header"; key: string; label: string }
+  | { kind: "row"; key: string; row: PortRow; hidden: HiddenReason | null }
+  | { kind: "more"; key: string; count: number };
+
 const FALLBACK_RESCAN_MS = 8000;
 const CACHE_KEY = "portlight.last";
-const DEFAULT_NEAR = 3000;
+const SETTINGS_CACHE_KEY = "portlight.settings.cache";
+const OS = detectOs();
 
 // One host process for as long as the popup is open, instead of one per request.
 const host = new HostClient(portTransport());
@@ -52,6 +77,12 @@ const state = {
   check: null as Check | null,
   suggestion: null as number | null,
   showSkeleton: false,
+  settings: loadSettingsCache(),
+  /** Local tabs by port. */
+  tabs: new Map<number, TabRef[]>(),
+  /** "N hidden" was clicked: show hidden rows until the popup closes. */
+  revealHidden: false,
+  menu: null as { key: string; scrollTop: number } | null,
 };
 
 // ---------- DOM helpers ----------
@@ -62,6 +93,7 @@ const input = $<HTMLInputElement>("q");
 const list = $<HTMLUListElement>("rows");
 const stateEl = $("state");
 const bodyEl = $("body");
+const menuEl = $("menu");
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -84,13 +116,77 @@ function announce(text: string) {
   requestAnimationFrame(() => (a.textContent = text));
 }
 
-const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+function reducedMotion(): boolean {
+  const m = state.settings.motion;
+  return m === "reduced" || (m === "system" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
 
 for (const el of document.querySelectorAll<HTMLElement>("[data-icon]")) {
   const name = el.dataset.icon as keyof typeof icon;
   el.innerHTML = icon[name](name === "search" ? 15 : 14);
 }
 $("clear").innerHTML = `<svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.5 1.5l5 5M6.5 1.5l-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+
+// ---------- settings ----------
+
+function loadSettingsCache(): Settings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_CACHE_KEY);
+    return raw ? normalizeSettings(JSON.parse(raw)) : { ...DEFAULT_SETTINGS };
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function applySettings(s: Settings, opts: { render?: boolean } = {}) {
+  const prev = state.settings;
+  state.settings = s;
+  try {
+    localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(s));
+  } catch {
+    /* first paint just uses defaults */
+  }
+  const root = document.documentElement;
+  if (s.theme === "system") delete root.dataset.theme;
+  else root.dataset.theme = s.theme;
+  if (s.motion === "system") delete root.dataset.motion;
+  else root.dataset.motion = s.motion;
+  if (prev.refreshMs !== s.refreshMs) restartLoop();
+  if (opts.render !== false) {
+    render({ animate: true });
+    pushBadge();
+    if (prev.preferredPort !== s.preferredPort) void updateSuggestion();
+  }
+}
+
+async function bootSettings() {
+  try {
+    applySettings(await loadSettings());
+    onSettingsChanged((s) => applySettings(s));
+  } catch {
+    /* no chrome.storage (e.g. opened outside the extension): defaults */
+  }
+}
+
+async function patchSettings(patch: Partial<Settings>) {
+  // Apply right away so the row reacts under the pointer; storage confirms it a moment later.
+  applySettings(normalizeSettings({ ...state.settings, ...patch }));
+  try {
+    await saveSettings(patch);
+  } catch {
+    /* storage unavailable: the change lasts until the popup closes */
+  }
+}
+
+const EDITOR_LABEL: Record<Exclude<Editor, "none">, string> = {
+  vscode: "VS Code",
+  cursor: "Cursor",
+  zed: "Zed",
+  webstorm: "WebStorm",
+  sublime: "Sublime Text",
+};
+
+const REVEAL_LABEL = OS === "mac" ? "Reveal in Finder" : OS === "win" ? "Show in Explorer" : "Open Folder";
 
 // ---------- clipboard / tabs ----------
 
@@ -127,7 +223,21 @@ function flashDone(btn: HTMLElement, glyphHost: HTMLElement = btn, size = 14) {
   );
 }
 
-function openPort(port: number) {
+function tabsFor(port: number): TabRef[] {
+  return state.tabs.get(port) ?? [];
+}
+
+/** Open a port: switch to the tab that already shows it, or open a new one. */
+async function openPort(port: number) {
+  const existing = bestTab(tabsFor(port));
+  if (existing) {
+    try {
+      await focusTab(existing);
+      return;
+    } catch {
+      /* tab vanished — open a fresh one */
+    }
+  }
   const url = urlFor(port);
   if (typeof chrome !== "undefined" && chrome.tabs?.create) void chrome.tabs.create({ url });
   else window.open(url, "_blank", "noopener");
@@ -138,6 +248,18 @@ async function copyUrl(row: PortRow, btn?: HTMLElement) {
     if (btn) flashDone(btn);
     announce(`Copied ${urlFor(row.port)}`);
   }
+}
+
+let tabsSeq = 0;
+async function refreshTabs(rerender = true) {
+  const seq = ++tabsSeq;
+  const tabs = await localTabs();
+  if (seq !== tabsSeq) return;
+  const sig = (m: Map<number, TabRef[]>) =>
+    [...m].map(([p, ts]) => `${p}:${ts.map((t) => `${t.id}/${t.title}`).join(",")}`).sort().join("|");
+  const changed = sig(tabs) !== sig(state.tabs);
+  state.tabs = tabs;
+  if (changed && rerender) render({ animate: true });
 }
 
 // ---------- cache (instant first paint) ----------
@@ -171,6 +293,10 @@ function setBadge(count: number | null) {
   }
 }
 
+function pushBadge() {
+  if (state.mode === "host") setBadge(badgeCount(state.rows, state.settings));
+}
+
 // ---------- data ----------
 
 let inflight: Promise<void> | null = null;
@@ -179,13 +305,13 @@ function refresh(): Promise<void> {
   if (state.mode === "fallback") return Promise.resolve();
   inflight ??= (async () => {
     try {
-      const res = await host.list();
+      const [res] = await Promise.all([host.list(), refreshTabs(false)]);
       state.rows = shapeListeners(res.listeners);
       state.stale = false;
       state.mode = "host";
       state.failure = null;
       saveCache(res.listeners);
-      setBadge(busyPortCount(state.rows));
+      pushBadge();
     } catch (e) {
       if (e instanceof HostConnectionError && (e.kind === "missing" || e.kind === "forbidden")) {
         state.mode = "missing";
@@ -212,13 +338,20 @@ function refresh(): Promise<void> {
 
 let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 
+function fallbackPorts(): number[] {
+  // Common dev ports, the user's extra ports, and every port an open tab points at.
+  const extra = state.settings.extraProbePorts.filter((p) => Number.isInteger(p) && p > 0 && p <= 65535);
+  return [...new Set([...COMMON_DEV_PORTS, ...extra, ...state.tabs.keys()])].sort((a, b) => a - b);
+}
+
 async function scanFallback(first = false) {
   if (state.mode !== "fallback") return;
   state.scanning = true;
   if (first) render();
+  await refreshTabs(false);
   const found: PortRow[] = first ? [] : state.rows.slice();
   const seen = new Set<number>();
-  await probePorts(COMMON_DEV_PORTS, {
+  await probePorts(fallbackPorts(), {
     onOpen: (r) => {
       seen.add(r.port);
       const row = probeToRow(r);
@@ -307,7 +440,7 @@ async function updateCheck() {
 let suggestSeq = 0;
 
 async function updateSuggestion() {
-  const near = queryPort() ?? DEFAULT_NEAR;
+  const near = queryPort() ?? state.settings.preferredPort;
   const seq = ++suggestSeq;
   if (state.mode !== "host" && state.mode !== "fallback") {
     state.suggestion = null;
@@ -331,10 +464,17 @@ async function updateSuggestion() {
   }
 }
 
-// ---------- kill ----------
+// ---------- row actions ----------
 
-function rowByKey(key: string) {
-  return state.rows.find((r) => r.key === key);
+function rowByKey(key: string): PortRow | undefined {
+  return state.rows.find((r) => r.key === key) ?? stoppedRows().find((r) => r.key === key);
+}
+
+function hostErrorMessage(e: unknown, fallback: string): string {
+  if (e instanceof HostRequestError && e.code === "not_permitted") return "Not permitted — it belongs to another user.";
+  if (e instanceof HostRequestError && e.code === "not_found") return "That process has already exited.";
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
 }
 
 async function kill(key: string, signal: "TERM" | "KILL") {
@@ -353,27 +493,33 @@ async function kill(key: string, signal: "TERM" | "KILL") {
     if (rowByKey(key)) {
       state.confirm = { key, phase: "stuck" };
     } else {
-      state.confirm = null;
-      announce(`Quit ${row.process ?? "process"} on port ${row.port}`);
+      // Something (launchd, brew services, a process manager) may have started it straight back up.
+      const back = state.rows.find((r) => r.port === row.port && r.process === row.process && r.key !== key);
+      state.confirm = back
+        ? { key: back.key, phase: "info", message: `${row.process ?? "It"} started again right away — something keeps restarting it.` }
+        : null;
+      announce(back ? `${row.process ?? "The process"} restarted on port ${row.port}` : `Quit ${row.process ?? "process"} on port ${row.port}`);
     }
   } catch (e) {
-    const message =
-      e instanceof HostRequestError && e.code === "not_permitted"
-        ? "Not permitted — it belongs to another user."
-        : e instanceof HostRequestError && e.code === "not_found"
-          ? "That process has already exited."
-          : e instanceof Error
-            ? e.message
-            : String(e);
-    state.confirm = { key, phase: "error", message };
+    state.confirm = { key, phase: "error", message: hostErrorMessage(e, "Couldn’t quit the process.") };
   }
   render();
 }
 
 function askKill(key: string) {
   const row = rowByKey(key);
-  if (!row?.pid || state.mode !== "host") return;
+  if (!row || state.mode !== "host") return;
+  if (row.known?.noQuit) {
+    showInfo(key);
+    return;
+  }
+  if (!row.pid) return;
   state.confirm = { key, phase: "ask" };
+  render();
+}
+
+function showInfo(key: string) {
+  state.confirm = state.confirm?.key === key && state.confirm.phase === "info" ? null : { key, phase: "info" };
   render();
 }
 
@@ -384,14 +530,72 @@ function cancelConfirm(refocus = true) {
   if (refocus && key) rowEls.get(key)?.querySelector<HTMLElement>(".row-main")?.focus();
 }
 
+async function hostAction(key: string, what: "reveal" | "editor") {
+  const row = rowByKey(key);
+  if (!row?.pid) return;
+  const editor = state.settings.editor;
+  const label = what === "reveal" ? REVEAL_LABEL : `Open in ${editor === "none" ? "editor" : EDITOR_LABEL[editor]}`;
+  try {
+    const res = what === "reveal" ? await host.reveal(row.pid) : await host.openEditor(row.pid, editor);
+    announce(`${what === "reveal" ? "Revealed" : "Opened"} ${res.path}`);
+  } catch (e) {
+    state.confirm = {
+      key,
+      phase: "notice",
+      message: isUnsupported(e)
+        ? `${label} needs a newer helper. Run ${installText()} again to update it.`
+        : hostErrorMessage(e, `${label} didn’t work.`),
+    };
+    render();
+  }
+}
+
 // ---------- rendering ----------
 
 const rowEls = new Map<string, HTMLLIElement>();
+const auxEls = new Map<string, HTMLLIElement>();
 
 function displayName(r: PortRow): { name: string; unknown: boolean } {
-  const name = r.project ?? r.title ?? r.tool ?? r.process;
+  if (r.source === "tab") return { name: r.title || `localhost:${r.port}`, unknown: false };
+  const name = r.container?.name ?? r.known?.name ?? r.project ?? r.title ?? r.tool ?? r.process;
   if (name) return { name, unknown: false };
   return { name: r.source === "http" ? "Web server" : "Unknown process", unknown: true };
+}
+
+function toolLabel(r: PortRow, name: string): string {
+  if (r.container) return r.container.image;
+  const t = r.known?.tool ?? r.tool;
+  return t && t !== name ? t : "";
+}
+
+/** Tabs open on ports with nothing listening — the server behind them has stopped. */
+function stoppedRows(): PortRow[] {
+  if (state.mode !== "host") return [];
+  const busy = new Set(state.rows.map((r) => r.port));
+  const out: PortRow[] = [];
+  for (const [port, tabs] of state.tabs) {
+    if (busy.has(port)) continue;
+    out.push({
+      key: `${port}:tab`,
+      port,
+      pid: null,
+      process: null,
+      tool: null,
+      project: null,
+      cwd: null,
+      command: null,
+      user: null,
+      addresses: [],
+      scope: "local",
+      startedAt: null,
+      source: "tab",
+      title: bestTab(tabs)?.title ?? null,
+      container: null,
+      group: "dev",
+      known: null,
+    });
+  }
+  return out.sort((a, b) => a.port - b.port);
 }
 
 function createRow(r: PortRow): HTMLLIElement {
@@ -406,18 +610,30 @@ function createRow(r: PortRow): HTMLLIElement {
       <span class="trail"><span class="uptime"></span></span>
     </button>
     <div class="actions">
-      <button class="icon-btn" type="button" data-act="copy">${icon.copy(15)}</button>
       <button class="icon-btn" type="button" data-act="open">${icon.open(15)}</button>
+      <button class="icon-btn" type="button" data-act="copy">${icon.copy(15)}</button>
+      <button class="icon-btn" type="button" data-act="menu" aria-haspopup="menu">${icon.more(15)}</button>
       <button class="icon-btn danger" type="button" data-act="kill">${icon.stop(15)}</button>
+      <button class="icon-btn" type="button" data-act="info">${icon.info(15)}</button>
+      <button class="icon-btn" type="button" data-act="close-tabs">${icon.xmark(15)}</button>
     </div>
     <div class="confirm"><div class="confirm-inner"><div class="confirm-content"></div></div></div>`;
   return li;
 }
 
-function updateRow(li: HTMLLIElement, r: PortRow) {
+function setHtml(el: HTMLElement, html: string) {
+  if (el.dataset.html !== html) {
+    el.innerHTML = html;
+    el.dataset.html = html;
+  }
+}
+
+function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
   const { name, unknown } = displayName(r);
-  const tool = r.tool && r.tool !== name ? r.tool : "";
+  const tool = toolLabel(r, name);
   const uptime = formatUptime(r.startedAt);
+  const tabs = tabsFor(r.port);
+  const idle = isIdle(r, tabs.length, state.settings.idleAfterHours);
   const main = li.querySelector<HTMLButtonElement>(".row-main")!;
   const set = (sel: string, text: string) => {
     const el = li.querySelector<HTMLElement>(sel)!;
@@ -428,48 +644,98 @@ function updateRow(li: HTMLLIElement, r: PortRow) {
   li.querySelector(".name")!.classList.toggle("unknown", unknown);
   set(".tool", tool);
   set(".uptime", uptime ?? "");
+  li.classList.toggle("is-hidden", !!hidden);
+  li.classList.toggle("stopped", r.source === "tab");
+  li.classList.toggle("linked", tabs.length > 0 && r.source !== "tab");
+
+  const tabWord = plural(tabs.length, "tab");
+  const tabsHtml =
+    tabs.length && r.source !== "tab"
+      ? `<span class="sep">·</span><span class="tabs" title="Open in ${tabWord} — click to switch">${icon.tab(12)}${tabWord}</span>`
+      : "";
+  const idleHtml = idle
+    ? `<span class="sep">·</span><span class="idle" title="Running ${esc(describeUptime(r.startedAt)?.replace(/^Running for /, "") ?? "")} with no tab open">Idle</span>`
+    : "";
 
   let line2: string;
-  if (r.source === "http") {
-    line2 = `<span class="proc">Answered HTTP${r.status ? ` ${r.status}` : ""}</span>`;
+  if (r.source === "tab") {
+    line2 = `<span class="gone-label">Server stopped</span><span class="sep">·</span><span class="proc">${tabWord}</span>`;
+  } else if (r.source === "http") {
+    line2 = `<span class="proc">Answered HTTP${r.status ? ` ${r.status}` : ""}</span>${tabsHtml}`;
   } else {
-    const proc = r.process && r.process !== name ? r.process : r.pid ? `PID ${r.pid}` : "";
+    let proc: string;
+    if (r.container) {
+      const c = r.container;
+      proc = [c.project, c.containerPort && c.containerPort !== r.port ? `container port ${c.containerPort}` : "container"]
+        .filter(Boolean)
+        .join(" · ");
+    } else {
+      proc = r.process && r.process !== name ? r.process : r.pid ? `PID ${r.pid}` : "";
+    }
     // Local is the norm, so it gets a quiet glyph; exposure is the exception and gets a word.
     line2 =
-      r.scope === "network"
+      (r.scope === "network"
         ? `<span class="scope network">${icon.network(12)}Network</span>${proc ? `<span class="sep">·</span><span class="proc">${esc(proc)}</span>` : ""}`
-        : `<span class="scope local" title="Only reachable from ${DEVICE}">${icon.lock(12)}</span>${proc ? `<span class="proc">${esc(proc)}</span>` : ""}`;
+        : `<span class="scope local" title="Only reachable from ${DEVICE}">${icon.lock(12)}</span>${proc ? `<span class="proc">${esc(proc)}</span>` : ""}`) +
+      tabsHtml +
+      idleHtml;
   }
-  const l2 = li.querySelector<HTMLElement>(".line2")!;
-  if (l2.dataset.html !== line2) {
-    l2.innerHTML = line2;
-    l2.dataset.html = line2;
+  setHtml(li.querySelector<HTMLElement>(".line2")!, line2);
+
+  if (r.source === "tab") {
+    main.setAttribute("aria-label", `Port ${r.port}, ${name}. Server stopped, ${tabWord} still open. Switch to tab.`);
+    main.title = tabs.map((t) => t.url).join("\n");
+  } else {
+    const details = [
+      `Port ${r.port}`,
+      name,
+      tool,
+      r.process && r.process !== name && !r.container ? r.process : "",
+      r.pid ? `PID ${r.pid}` : "",
+      describeScope(r, DEVICE),
+      describeUptime(r.startedAt) ?? "",
+      tabs.length ? `open in ${tabWord}` : "",
+      idle ? "idle" : "",
+      hidden ? "hidden" : "",
+    ].filter(Boolean);
+    main.setAttribute("aria-label", `${details.join(", ")}. ${tabs.length ? "Switch to tab." : "Open in a new tab."}`);
+    main.title = [r.container?.workingDir, r.command, r.cwd, describeScope(r, DEVICE)].filter(Boolean).join("\n") || urlFor(r.port);
   }
 
-  const details = [
-    `Port ${r.port}`,
-    name,
-    tool,
-    r.process && r.process !== name ? r.process : "",
-    r.pid ? `PID ${r.pid}` : "",
-    describeScope(r, DEVICE),
-    describeUptime(r.startedAt) ?? "",
-  ].filter(Boolean);
-  main.setAttribute("aria-label", `${details.join(", ")}. Open in a new tab.`);
-  main.title = [r.command, r.cwd, describeScope(r, DEVICE)].filter(Boolean).join("\n") || urlFor(r.port);
-
-  const copyBtn = li.querySelector<HTMLElement>('[data-act="copy"]')!;
+  const btn = (act: string) => li.querySelector<HTMLElement>(`[data-act="${act}"]`)!;
+  const isTab = r.source === "tab";
+  const canQuit = r.source === "host" && !!r.pid && state.mode === "host" && !r.known?.noQuit;
+  const openBtn = btn("open");
+  openBtn.hidden = !isTab;
+  openBtn.setAttribute("aria-label", `Switch to the tab on port ${r.port}`);
+  openBtn.title = "Switch to tab  ↩";
+  const copyBtn = btn("copy");
+  copyBtn.hidden = isTab;
   copyBtn.setAttribute("aria-label", `Copy ${urlFor(r.port)}`);
   copyBtn.title = "Copy URL  ⌘C";
-  const openBtn = li.querySelector<HTMLElement>('[data-act="open"]')!;
-  openBtn.setAttribute("aria-label", `Open port ${r.port} in a new tab`);
-  openBtn.title = "Open in new tab  ↩";
-  const killBtn = li.querySelector<HTMLElement>('[data-act="kill"]')!;
-  killBtn.hidden = !r.pid || state.mode !== "host";
+  const menuBtn = btn("menu");
+  menuBtn.hidden = isTab;
+  menuBtn.setAttribute("aria-label", `More actions for port ${r.port}`);
+  menuBtn.setAttribute("aria-expanded", String(state.menu?.key === r.key));
+  menuBtn.title = "More";
+  const killBtn = btn("kill");
+  killBtn.hidden = !canQuit;
   killBtn.setAttribute("aria-label", `Quit ${r.process ?? "process"} on port ${r.port}`);
   killBtn.title = "Quit process  ⌘⌫";
+  const infoBtn = btn("info");
+  infoBtn.hidden = !(r.known?.noQuit && r.source === "host");
+  infoBtn.setAttribute("aria-label", `About ${name}`);
+  infoBtn.title = "Why can’t I quit this?";
+  const closeBtn = btn("close-tabs");
+  closeBtn.hidden = !isTab;
+  closeBtn.setAttribute("aria-label", `Close ${tabWord} on port ${r.port}`);
+  closeBtn.title = tabs.length > 1 ? `Close ${tabWord}` : "Close tab";
 
   renderConfirm(li, r);
+}
+
+function commandHtml(cmd: string): string {
+  return `<div class="cmd-line"><code>${esc(cmd)}</code><button class="icon-btn" type="button" data-act="copy-cmd" data-cmd="${esc(cmd)}" aria-label="Copy ${esc(cmd)}" title="Copy command">${icon.copy(14)}</button></div>`;
 }
 
 function renderConfirm(li: HTMLLIElement, r: PortRow) {
@@ -487,20 +753,33 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
     return;
   }
   const proc = esc(r.process ?? "this process");
+  const k = r.known;
+  // Homebrew services and the like: Quit works, but it's worth knowing it may come back.
+  const note = k && !k.noQuit ? `<div class="confirm-note">${esc(k.about)}${k.command ? commandHtml(k.command) : ""}</div>` : "";
   let html = "";
+  box.classList.toggle("stack", c.phase === "info" || ((c.phase === "ask" || c.phase === "stuck") && !!note));
   if (c.phase === "ask") {
-    html = `<span class="confirm-text">Quit <strong>${proc}</strong>?</span>
+    html = `${note}<div class="confirm-row"><span class="confirm-text">Quit <strong>${proc}</strong>?</span>
       <button class="btn" type="button" data-act="cancel">Cancel</button>
-      <button class="btn destructive" type="button" data-act="quit">Quit</button>`;
+      <button class="btn destructive" type="button" data-act="quit">Quit</button></div>`;
   } else if (c.phase === "pending") {
-    html = `<span class="confirm-text">Quitting <strong>${proc}</strong>…</span>`;
+    html = `<div class="confirm-row"><span class="confirm-text">Quitting <strong>${proc}</strong>…</span></div>`;
   } else if (c.phase === "stuck") {
-    html = `<span class="confirm-text"><strong>${proc}</strong> is still running.</span>
+    html = `${note}<div class="confirm-row"><span class="confirm-text"><strong>${proc}</strong> is still running.</span>
       <button class="btn" type="button" data-act="cancel">Cancel</button>
-      <button class="btn destructive" type="button" data-act="force">Force Quit</button>`;
+      <button class="btn destructive" type="button" data-act="force">Force Quit</button></div>`;
+  } else if (c.phase === "info") {
+    const lead = c.message ? `<p class="explain-lead">${esc(c.message)}</p>` : "";
+    const about = k ? `<p>${esc(k.about)}</p>` : "";
+    const fix = k?.fix ? `<p class="explain-fix">${esc(k.fix)}</p>` : "";
+    html = `<div class="explain">${lead}${about}${fix}${k?.command ? commandHtml(k.command) : ""}</div>
+      <div class="confirm-row end"><button class="btn" type="button" data-act="cancel">Done</button></div>`;
+  } else if (c.phase === "notice") {
+    html = `<div class="confirm-row"><span class="confirm-text">${esc(c.message ?? "")}</span>
+      <button class="btn" type="button" data-act="cancel">OK</button></div>`;
   } else {
-    html = `<span class="confirm-text error">${esc(c.message ?? "Couldn’t quit the process.")}</span>
-      <button class="btn" type="button" data-act="cancel">OK</button>`;
+    html = `<div class="confirm-row"><span class="confirm-text error">${esc(c.message ?? "Couldn’t quit the process.")}</span>
+      <button class="btn" type="button" data-act="cancel">OK</button></div>`;
   }
   box.innerHTML = html;
   const focusTarget = box.querySelector<HTMLElement>('[data-act="quit"], [data-act="force"], [data-act="cancel"]');
@@ -509,13 +788,18 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
   if (c.phase === "pending") li.querySelector<HTMLElement>(".row-main")?.focus({ preventScroll: true });
 }
 
-function removeRow(key: string, el: HTMLLIElement, animate: boolean) {
-  rowEls.delete(key);
-  if (el.contains(document.activeElement)) {
-    const next =
-      (el.nextElementSibling ?? el.previousElementSibling)?.querySelector<HTMLElement>(".row-main") ?? input;
-    next.focus({ preventScroll: true });
+function nextRowMain(el: HTMLElement): HTMLElement | null {
+  for (const dir of ["nextElementSibling", "previousElementSibling"] as const) {
+    let n = el[dir] as HTMLElement | null;
+    while (n && !(n.matches("li.row") && !n.classList.contains("leaving"))) n = n[dir] as HTMLElement | null;
+    const main = n?.querySelector<HTMLElement>(".row-main");
+    if (main) return main;
   }
+  return null;
+}
+
+function removeEl(el: HTMLLIElement, animate: boolean) {
+  if (el.contains(document.activeElement)) (nextRowMain(el) ?? input).focus({ preventScroll: true });
   if (!animate || reducedMotion()) {
     el.remove();
     return;
@@ -530,27 +814,106 @@ function removeRow(key: string, el: HTMLLIElement, animate: boolean) {
 
 let firstPaint = true;
 
-function renderRows(rows: PortRow[], animate: boolean) {
-  const keep = new Set(rows.map((r) => r.key));
-  for (const [key, el] of rowEls) if (!keep.has(key)) removeRow(key, el, animate);
-  let prev: HTMLLIElement | null = null;
-  for (const r of rows) {
-    let el = rowEls.get(r.key);
-    if (!el) {
-      el = createRow(r);
-      rowEls.set(r.key, el);
-      if (animate && !firstPaint && !reducedMotion()) {
-        el.classList.add("entering");
-        const node = el;
-        requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("entering")));
-      }
+function createAux(item: Exclude<Item, { kind: "row" }>): HTMLLIElement {
+  if (item.kind === "header") return h("li", { class: "section-label", role: "presentation", "data-key": item.key });
+  const li = h("li", { class: "more", role: "presentation", "data-key": item.key });
+  li.innerHTML = `<button class="more-btn" type="button" data-act="toggle-hidden"></button>`;
+  return li;
+}
+
+function updateAux(li: HTMLLIElement, item: Exclude<Item, { kind: "row" }>) {
+  if (item.kind === "header") {
+    if (li.textContent !== item.label) li.textContent = item.label;
+    return;
+  }
+  const btn = li.querySelector<HTMLButtonElement>(".more-btn")!;
+  const html = state.revealHidden
+    ? `<span class="more-count">${item.count} hidden</span><span class="more-act">Hide</span>`
+    : `<span class="more-count">${item.count} hidden</span><span class="more-act">Show</span>`;
+  setHtml(btn, html);
+  btn.setAttribute("aria-expanded", String(state.revealHidden));
+  btn.setAttribute("aria-label", state.revealHidden ? `Hide ${plural(item.count, "hidden port")} again` : `Show ${plural(item.count, "hidden port")}`);
+}
+
+function renderList(items: Item[], animate: boolean) {
+  const keepRows = new Set(items.filter((i) => i.kind === "row").map((i) => i.key));
+  const keepAux = new Set(items.filter((i) => i.kind !== "row").map((i) => i.key));
+  for (const [key, el] of rowEls) {
+    if (!keepRows.has(key)) {
+      rowEls.delete(key);
+      removeEl(el, animate);
     }
-    updateRow(el, r);
-    const anchor: ChildNode | null = prev ? prev.nextSibling : list.firstChild;
+  }
+  for (const [key, el] of auxEls) {
+    if (!keepAux.has(key)) {
+      auxEls.delete(key);
+      el.remove();
+    }
+  }
+  let prev: HTMLLIElement | null = null;
+  for (const item of items) {
+    let el: HTMLLIElement | undefined;
+    if (item.kind === "row") {
+      el = rowEls.get(item.key);
+      if (!el) {
+        el = createRow(item.row);
+        rowEls.set(item.key, el);
+        if (animate && !firstPaint && !reducedMotion()) {
+          el.classList.add("entering");
+          const node = el;
+          requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("entering")));
+        }
+      }
+      updateRow(el, item.row, item.hidden);
+    } else {
+      el = auxEls.get(item.key);
+      if (!el) {
+        el = createAux(item);
+        auxEls.set(item.key, el);
+      }
+      updateAux(el, item);
+    }
+    // Skip over rows that are animating out so new items don't jump around them.
+    let anchor: ChildNode | null = prev ? prev.nextSibling : list.firstChild;
+    while (anchor && anchor !== el && (anchor as HTMLElement).classList?.contains("leaving")) anchor = anchor.nextSibling;
     if (anchor !== el) list.insertBefore(el, anchor);
     prev = el;
   }
-  if (rows.length) firstPaint = false;
+  if (keepRows.size) firstPaint = false;
+}
+
+/** The rows the list shows right now, with group headers and the "N hidden" affordance. */
+function buildItems(): { items: Item[]; visible: number } {
+  if (state.mode !== "host" && state.mode !== "fallback") return { items: [], visible: 0 };
+  const s = state.settings;
+  const searching = !!state.query.trim();
+  const candidates = filterRows([...state.rows, ...stoppedRows()], state.query).map((row) => ({
+    row,
+    hidden: row.source === "tab" ? null : hiddenReason(row, s),
+  }));
+  const hiddenCount = candidates.filter((c) => c.hidden).length;
+  // Searching is explicit, so it finds hidden ports too; otherwise they wait behind "N hidden".
+  const shown = searching || state.revealHidden ? candidates : candidates.filter((c) => !c.hidden);
+
+  const bucket = (r: PortRow) => (r.source === "tab" ? "stopped" : r.group);
+  const order = [...GROUP_ORDER, "stopped"] as const;
+  const groups = new Set(shown.map((c) => bucket(c.row)));
+  const items: Item[] = [];
+  const pushRow = (c: (typeof shown)[number]) => items.push({ kind: "row", key: c.row.key, row: c.row, hidden: c.hidden });
+  if (s.groupRows && groups.size > 1) {
+    for (const g of order) {
+      const members = shown.filter((c) => bucket(c.row) === g);
+      if (!members.length) continue;
+      items.push({ kind: "header", key: `h:${g}`, label: g === "stopped" ? "Tabs Without a Server" : GROUP_LABEL[g] });
+      members.forEach(pushRow);
+    }
+  } else {
+    // Ungrouped: live servers by port, tabs whose server stopped at the end.
+    shown.filter((c) => c.row.source !== "tab").forEach(pushRow);
+    shown.filter((c) => c.row.source === "tab").forEach(pushRow);
+  }
+  if (!searching && hiddenCount) items.push({ kind: "more", key: "more", count: hiddenCount });
+  return { items, visible: shown.length };
 }
 
 function skeletonHtml(n = 4) {
@@ -617,17 +980,16 @@ function onboardingHtml(): string {
 }
 
 function renderBody(animate: boolean) {
-  const visible = state.mode === "host" || state.mode === "fallback" ? filterRows(state.rows, state.query) : [];
   bodyEl.setAttribute("aria-busy", String(state.mode === "loading" || state.scanning));
 
   if (state.mode === "missing") {
-    renderRows([], false);
+    renderList([], false);
     showState(onboardingHtml(), "onboarding");
     stateEl.className = "";
     return;
   }
   if (state.mode === "loading") {
-    renderRows([], false);
+    renderList([], false);
     if (state.showSkeleton) {
       hideState();
       list.innerHTML = skeletonHtml();
@@ -637,7 +999,7 @@ function renderBody(animate: boolean) {
   list.querySelectorAll(".skeleton").forEach((s) => s.remove());
 
   if (state.mode === "error") {
-    renderRows([], false);
+    renderList([], false);
     showState(
       `<div class="state-mark">${icon.warning(22)}</div>
        <h2>Couldn’t read ports</h2>
@@ -651,9 +1013,11 @@ function renderBody(animate: boolean) {
     return;
   }
 
-  renderRows(visible, animate);
+  const { items, visible } = buildItems();
+  renderList(items, animate);
+  if (state.menu && !rowEls.has(state.menu.key)) closeMenu(false);
 
-  if (visible.length) {
+  if (visible) {
     hideState();
   } else if (state.query.trim()) {
     if (state.check) hideState();
@@ -665,13 +1029,16 @@ function renderBody(animate: boolean) {
   } else if (state.mode === "fallback" && state.scanning) {
     showState(
       `<div class="state-mark">${icon.waves(22)}</div><h2>Scanning common ports…</h2>
-       <p>Knocking on ${COMMON_DEV_PORTS.length} ports where dev servers usually live.</p>`,
+       <p>Knocking on ${fallbackPorts().length} ports where dev servers usually live.</p>`,
     );
   } else if (state.mode === "fallback") {
     showState(
       `<div class="state-mark">${icon.waves(22)}</div><h2>No web servers found</h2>
        <p>Nothing answered on the usual dev ports. Databases and other non-web services need the helper to show up.</p>`,
     );
+  } else if (items.length) {
+    // Everything is hidden: the "N hidden" row is the whole list.
+    hideState();
   } else {
     showState(
       `<div class="state-mark">${icon.waves(22)}</div><h2>Nothing is listening</h2>
@@ -679,6 +1046,11 @@ function renderBody(animate: boolean) {
       "empty",
     );
   }
+}
+
+/** Ports the user sees (hidden ones don't count towards "N ports in use"). */
+function visibleCount(): number {
+  return busyPortCount(state.rows.filter((r) => !hiddenReason(r, state.settings)));
 }
 
 function renderChrome() {
@@ -690,10 +1062,10 @@ function renderChrome() {
       text = "Looking…";
       break;
     case "host":
-      text = state.stale ? "Reconnecting…" : summary(busyPortCount(state.rows));
+      text = state.stale ? "Reconnecting…" : summary(visibleCount());
       break;
     case "fallback":
-      text = state.scanning && !state.rows.length ? "Scanning…" : `${plural(busyPortCount(state.rows), "server")} · HTTP only`;
+      text = state.scanning && !state.rows.length ? "Scanning…" : `${plural(visibleCount(), "server")} · HTTP only`;
       break;
     case "missing":
       text = "Not connected";
@@ -712,11 +1084,10 @@ function renderChrome() {
   const banner = $("banner");
   if (state.mode === "fallback") {
     banner.hidden = false;
-    const html = `${icon.waves(14)}<span><strong>HTTP only.</strong> Showing dev servers that answer on common ports. <button class="link" type="button" data-act="setup">Install the helper</button> to see every port and its app.</span>`;
-    if (banner.dataset.html !== html) {
-      banner.innerHTML = html;
-      banner.dataset.html = html;
-    }
+    setHtml(
+      banner,
+      `${icon.waves(14)}<span><strong>HTTP only.</strong> Showing dev servers that answer on common ports. <button class="link" type="button" data-act="setup">Install the helper</button> to see every port and its app.</span>`,
+    );
   } else {
     banner.hidden = true;
     banner.dataset.html = "";
@@ -735,6 +1106,7 @@ function renderCheck() {
   const httpOnly = state.mode === "fallback";
   let title = "";
   let sub = "";
+  let note = "";
   let action = "";
   if (c.state === "free") {
     title = `Port ${c.port} is <em>free</em>`;
@@ -742,11 +1114,18 @@ function renderCheck() {
     action = `<button class="btn" type="button" data-act="copy-port" data-port="${c.port}"><span class="bglyph">${icon.copy(13)}</span><span>Copy</span></button>`;
   } else if (c.state === "used") {
     const r = c.row;
-    const who = r ? [displayName(r).name, r.tool && r.tool !== displayName(r).name ? r.tool : "", r.source === "host" ? r.process : ""] : [];
+    const who = r ? [displayName(r).name, toolLabel(r, displayName(r).name), r.source === "host" && !r.container ? r.process : ""] : [];
     const uniq = [...new Set(who.filter(Boolean) as string[])];
     title = `Port ${c.port} is in use`;
     sub = uniq.length ? `by ${esc(uniq.join(" · "))}` : httpOnly ? "A web server answered." : "Something is listening on it.";
-    action = `<button class="btn" type="button" data-act="open-port" data-port="${c.port}">Open</button>`;
+    // The one place people meet AirPlay Receiver: they typed 5000 because their server failed to start.
+    if (r?.known?.noQuit) note = esc(r.known.fix ?? r.known.about);
+    const hasTab = tabsFor(c.port).length > 0;
+    // Nothing to open on a port the OS holds (AirPlay, Remote Login…), unless a tab already points there.
+    action =
+      r?.group === "system" && !hasTab
+        ? ""
+        : `<button class="btn" type="button" data-act="open-port" data-port="${c.port}">${hasTab ? "Show Tab" : "Open"}</button>`;
   } else if (c.state === "pending") {
     title = `Checking ${c.port}…`;
     sub = "Knocking over HTTP.";
@@ -755,13 +1134,13 @@ function renderCheck() {
     sub = "No web server answered. HTTP only — other services can’t be seen.";
     action = `<button class="btn" type="button" data-act="copy-port" data-port="${c.port}"><span class="bglyph">${icon.copy(13)}</span><span>Copy</span></button>`;
   }
-  const sig = `${c.port}|${c.state}|${sub}`;
+  const sig = `${c.port}|${c.state}|${sub}|${note}|${action}`;
   if (box.dataset.sig === sig) return;
   const appearing = box.hidden;
   box.dataset.sig = sig;
   box.dataset.state = c.state === "unknown" ? "free" : c.state;
   box.innerHTML = `<span class="check-dot" aria-hidden="true"></span>
-    <div class="check-copy"><div class="check-title">${title}</div><div class="check-sub">${sub}</div></div>${action}`;
+    <div class="check-copy"><div class="check-title">${title}</div><div class="check-sub">${sub}</div>${note ? `<div class="check-note">${note}</div>` : ""}</div>${action}`;
   box.hidden = false;
   if (!appearing) box.style.animation = "none";
   else box.style.animation = "";
@@ -788,6 +1167,149 @@ function render(opts: { animate?: boolean } = {}) {
   renderFooter();
 }
 
+// ---------- row menu ----------
+
+interface MenuItem {
+  act: string;
+  label: string;
+  hint?: string;
+  danger?: boolean;
+}
+
+function menuItems(r: PortRow): MenuItem[][] {
+  const s = state.settings;
+  const sections: MenuItem[][] = [];
+  const tabs = tabsFor(r.port);
+  sections.push([
+    { act: "m-open", label: tabs.length ? "Switch to Tab" : "Open in New Tab", hint: "↩" },
+    { act: "m-copy", label: "Copy URL", hint: "⌘C" },
+  ]);
+  if (r.source === "host" && r.pid && state.mode === "host" && !r.container) {
+    const files: MenuItem[] = [{ act: "m-reveal", label: REVEAL_LABEL }];
+    if (s.editor !== "none") files.push({ act: "m-editor", label: `Open in ${EDITOR_LABEL[s.editor]}` });
+    sections.push(files);
+  }
+  const reason = hiddenReason(r, s);
+  const hide: MenuItem[] = [
+    s.hiddenPorts.includes(r.port)
+      ? { act: "m-unhide-port", label: `Show Port ${r.port}` }
+      : { act: "m-hide-port", label: `Hide Port ${r.port}` },
+  ];
+  if (r.process && !r.container && r.source === "host") {
+    const hiddenProc = s.hiddenProcesses.some((p) => p.toLowerCase() === r.process!.toLowerCase());
+    hide.push(
+      hiddenProc
+        ? { act: "m-unhide-proc", label: `Show All “${r.process}”` }
+        : { act: "m-hide-proc", label: `Hide All “${r.process}”` },
+    );
+  }
+  if (reason === "system") hide.push({ act: "m-show-system", label: "Always Show System Ports" });
+  sections.push(hide);
+  if (r.source === "host" && state.mode === "host") {
+    if (r.known?.noQuit) sections.push([{ act: "info", label: "Why Can’t I Quit This?" }]);
+    else if (r.pid) sections.push([{ act: "kill", label: `Quit ${r.process ?? "Process"}…`, hint: "⌘⌫", danger: true }]);
+  }
+  return sections;
+}
+
+function openMenu(key: string, at?: { x: number; y: number }) {
+  const r = rowByKey(key);
+  const li = rowEls.get(key);
+  if (!r || !li || r.source === "tab") return;
+  if (state.confirm && state.confirm.key !== key) state.confirm = null;
+  state.menu = { key, scrollTop: bodyEl.scrollTop };
+  menuEl.innerHTML = menuItems(r)
+    .map((sec) =>
+      sec
+        .map(
+          (m) =>
+            `<button class="menu-item${m.danger ? " danger" : ""}" type="button" role="menuitem" tabindex="-1" data-act="${m.act}" data-key="${esc(key)}"><span>${esc(m.label)}</span>${m.hint ? `<span class="menu-hint">${m.hint}</span>` : ""}</button>`,
+        )
+        .join(""),
+    )
+    .join(`<div class="menu-sep" role="separator"></div>`);
+  menuEl.setAttribute("aria-label", `Actions for port ${r.port}`);
+  menuEl.hidden = false;
+  li.classList.add("menu-open");
+  render();
+
+  // Place under the ⋯ button (or at the pointer), kept inside the popup.
+  const anchor = li.querySelector<HTMLElement>('[data-act="menu"]')!.getBoundingClientRect();
+  const w = menuEl.offsetWidth;
+  const hgt = menuEl.offsetHeight;
+  let x = at ? at.x : anchor.right - w;
+  let y = at ? at.y : anchor.bottom + 4;
+  if (y + hgt > innerHeight - 8) y = at ? at.y - hgt : anchor.top - hgt - 4;
+  x = Math.max(8, Math.min(x, innerWidth - w - 8));
+  y = Math.max(8, y);
+  menuEl.style.left = `${x}px`;
+  menuEl.style.top = `${y}px`;
+  menuEl.style.transformOrigin = `${at ? "left" : "right"} ${y < anchor.top ? "bottom" : "top"}`;
+  menuEl.classList.remove("in");
+  void menuEl.offsetWidth;
+  menuEl.classList.add("in");
+  menuEl.querySelector<HTMLElement>(".menu-item")?.focus({ preventScroll: true });
+}
+
+function closeMenu(refocus = true) {
+  const key = state.menu?.key;
+  if (!key) return;
+  state.menu = null;
+  menuEl.hidden = true;
+  menuEl.innerHTML = "";
+  const li = rowEls.get(key);
+  li?.classList.remove("menu-open");
+  li?.querySelector('[data-act="menu"]')?.setAttribute("aria-expanded", "false");
+  if (refocus) li?.querySelector<HTMLElement>(".row-main")?.focus({ preventScroll: true });
+}
+
+async function runMenuAction(act: string, key: string) {
+  const r = rowByKey(key);
+  closeMenu(act !== "kill" && act !== "info");
+  if (!r) return;
+  const s = state.settings;
+  switch (act) {
+    case "m-open":
+      await openPort(r.port);
+      break;
+    case "m-copy":
+      await copyUrl(r, rowEls.get(key)?.querySelector<HTMLElement>('[data-act="copy"]') ?? undefined);
+      break;
+    case "m-reveal":
+      await hostAction(key, "reveal");
+      break;
+    case "m-editor":
+      await hostAction(key, "editor");
+      break;
+    case "m-hide-port":
+      await patchSettings({ hiddenPorts: [...new Set([...s.hiddenPorts, r.port])] });
+      announce(`Port ${r.port} hidden`);
+      break;
+    case "m-unhide-port":
+      await patchSettings({ hiddenPorts: s.hiddenPorts.filter((p) => p !== r.port) });
+      announce(`Port ${r.port} shown`);
+      break;
+    case "m-hide-proc":
+      await patchSettings({ hiddenProcesses: [...new Set([...s.hiddenProcesses, r.process!])] });
+      announce(`${r.process} hidden`);
+      break;
+    case "m-unhide-proc":
+      await patchSettings({ hiddenProcesses: s.hiddenProcesses.filter((p) => p.toLowerCase() !== r.process!.toLowerCase()) });
+      announce(`${r.process} shown`);
+      break;
+    case "m-show-system":
+      await patchSettings({ hideSystem: false });
+      announce("System ports shown");
+      break;
+    case "kill":
+      askKill(key);
+      break;
+    case "info":
+      showInfo(key);
+      break;
+  }
+}
+
 // ---------- events ----------
 
 function rowFromEvent(target: Element): { key: string; row: PortRow; li: HTMLLIElement } | null {
@@ -799,21 +1321,42 @@ function rowFromEvent(target: Element): { key: string; row: PortRow; li: HTMLLIE
 
 document.addEventListener("click", async (e) => {
   const target = e.target as Element;
+  if (state.menu && !menuEl.contains(target) && !target.closest('[data-act="menu"]')) closeMenu(false);
   const btn = target.closest<HTMLElement>("[data-act], .row-main");
   if (!btn) return;
   const act = btn.dataset.act ?? "row";
+  if (btn.classList.contains("menu-item")) {
+    await runMenuAction(act, btn.dataset.key!);
+    return;
+  }
   const hit = rowFromEvent(btn);
 
   switch (act) {
     case "row":
     case "open":
-      if (hit) openPort(hit.row.port);
+      if (hit) await openPort(hit.row.port);
       break;
     case "copy":
       if (hit) await copyUrl(hit.row, btn);
       break;
+    case "menu":
+      if (hit) {
+        if (state.menu?.key === hit.key) closeMenu();
+        else openMenu(hit.key);
+      }
+      break;
     case "kill":
       if (hit) askKill(hit.key);
+      break;
+    case "info":
+      if (hit) showInfo(hit.key);
+      break;
+    case "close-tabs":
+      if (hit) {
+        await closeTabs(tabsFor(hit.row.port));
+        announce(`Closed ${plural(tabsFor(hit.row.port).length, "tab")} on port ${hit.row.port}`);
+        await refreshTabs();
+      }
       break;
     case "quit":
       if (hit) await kill(hit.key, "TERM");
@@ -824,6 +1367,25 @@ document.addEventListener("click", async (e) => {
     case "cancel":
       cancelConfirm();
       break;
+    case "copy-cmd": {
+      if (await copyText(btn.dataset.cmd!)) {
+        flashDone(btn, btn, 14);
+        announce(`Copied ${btn.dataset.cmd}`);
+      }
+      break;
+    }
+    case "toggle-hidden":
+      state.revealHidden = !state.revealHidden;
+      render({ animate: true });
+      announce(state.revealHidden ? "Hidden ports shown" : "Hidden ports hidden again");
+      break;
+    case "settings":
+      try {
+        await chrome.runtime.openOptionsPage();
+      } catch {
+        announce("Settings aren’t available in this build");
+      }
+      break;
     case "copy-port": {
       const p = btn.dataset.port!;
       if (await copyText(p)) {
@@ -833,7 +1395,7 @@ document.addEventListener("click", async (e) => {
       break;
     }
     case "open-port":
-      openPort(Number(btn.dataset.port));
+      await openPort(Number(btn.dataset.port));
       break;
     case "copy-install": {
       if (await copyText(installText())) {
@@ -866,6 +1428,13 @@ document.addEventListener("click", async (e) => {
   }
 });
 
+document.addEventListener("contextmenu", (e) => {
+  const hit = rowFromEvent(e.target as Element);
+  if (!hit || hit.row.source === "tab") return;
+  e.preventDefault();
+  openMenu(hit.key, { x: e.clientX, y: e.clientY });
+});
+
 $("suggest").addEventListener("click", async () => {
   const p = state.suggestion;
   if (!p) return;
@@ -884,6 +1453,7 @@ function setQuery(q: string) {
   input.value = q;
   state.query = q;
   state.confirm = null;
+  closeMenu(false);
   void updateCheck(); // sets the instant answer synchronously, so render() below sees it
   render();
   void updateSuggestion();
@@ -891,7 +1461,15 @@ function setQuery(q: string) {
 
 input.addEventListener("input", () => setQuery(input.value));
 
-bodyEl.addEventListener("scroll", () => app.classList.toggle("scrolled", bodyEl.scrollTop > 0), { passive: true });
+bodyEl.addEventListener(
+  "scroll",
+  () => {
+    app.classList.toggle("scrolled", bodyEl.scrollTop > 0);
+    // Close when the list really moves; a late scroll event from bringing the row into view doesn't count.
+    if (state.menu && Math.abs(bodyEl.scrollTop - state.menu.scrollTop) > 4) closeMenu(false);
+  },
+  { passive: true },
+);
 
 function rowMains(): HTMLElement[] {
   return [...list.querySelectorAll<HTMLElement>("li.row:not(.leaving) .row-main")];
@@ -904,7 +1482,38 @@ function focusRow(i: number) {
   el?.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
 }
 
+function menuKeys(e: KeyboardEvent): boolean {
+  if (!state.menu) return false;
+  const items = [...menuEl.querySelectorAll<HTMLElement>(".menu-item")];
+  const i = items.indexOf(document.activeElement as HTMLElement);
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeMenu();
+  } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const n = items.length;
+    const next = e.key === "ArrowDown" ? (i + 1) % n : (i - 1 + n) % n;
+    items[next]?.focus();
+  } else if (e.key === "Home" || e.key === "End") {
+    e.preventDefault();
+    items[e.key === "Home" ? 0 : items.length - 1]?.focus();
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    closeMenu();
+  } else if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
+    // Type-to-select, like a native menu.
+    const k = e.key.toLowerCase();
+    const start = i + 1;
+    const hit = [...items.slice(start), ...items.slice(0, start)].find((el) => el.textContent?.trim().toLowerCase().startsWith(k));
+    hit?.focus();
+  } else {
+    return false;
+  }
+  return true;
+}
+
 document.addEventListener("keydown", (e) => {
+  if (menuKeys(e)) return;
   const target = e.target as HTMLElement;
   const inSearch = target === input;
   const mod = e.metaKey || e.ctrlKey;
@@ -970,6 +1579,9 @@ document.addEventListener("keydown", (e) => {
     } else if ((e.key === "Backspace" || e.key === "Delete") && hit) {
       e.preventDefault();
       askKill(hit.key);
+    } else if ((e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) && hit) {
+      e.preventDefault();
+      openMenu(hit.key);
     } else if (e.key.length === 1 && !mod && !e.altKey) {
       // Typing on a row keeps refining the search.
       input.focus();
@@ -979,6 +1591,18 @@ document.addEventListener("keydown", (e) => {
 
 // ---------- boot ----------
 
+let loop: ReturnType<typeof setInterval> | undefined;
+function restartLoop() {
+  clearInterval(loop);
+  loop = setInterval(
+    () => {
+      if (document.visibilityState === "visible" && (state.mode === "host" || state.mode === "error")) void refresh();
+    },
+    Math.max(500, state.settings.refreshMs || DEFAULT_SETTINGS.refreshMs),
+  );
+}
+
+applySettings(state.settings, { render: false });
 const cached = loadCache();
 if (cached) {
   state.mode = "host";
@@ -995,11 +1619,12 @@ setTimeout(() => {
 }, 120);
 
 input.focus();
+void bootSettings();
 void refresh();
-const loop = setInterval(() => {
-  if (document.visibilityState === "visible" && (state.mode === "host" || state.mode === "error")) void refresh();
-}, REFRESH_MS);
+restartLoop();
+const unwatchTabs = watchTabs(() => void refreshTabs());
 addEventListener("pagehide", () => {
   clearInterval(loop);
   clearTimeout(fallbackTimer);
+  unwatchTabs();
 });

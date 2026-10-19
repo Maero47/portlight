@@ -86,3 +86,17 @@ describe("probePorts", () => {
     });
   });
 });
+
+describe("AirPlay Receiver over HTTP", () => {
+  it("recognises the AirTunes server header and treats it as a system port", async () => {
+    const fetcher: Fetcher = async () => new Response(null, { status: 403, headers: { server: "AirTunes/980.77.5" } });
+    const r = await probePort(5000, fetcher);
+    expect(r).toMatchObject({ open: true, status: 403, server: "AirTunes/980.77.5" });
+    const row = probeToRow(r);
+    expect(row).toMatchObject({ process: "ControlCenter", group: "system", known: { name: "AirPlay Receiver", noQuit: true } });
+  });
+  it("leaves ordinary servers alone", async () => {
+    const row = probeToRow({ port: 3000, open: true, status: 200, title: "App", server: "Vite" });
+    expect(row).toMatchObject({ process: null, group: "dev", known: null });
+  });
+});

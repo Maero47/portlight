@@ -1,4 +1,7 @@
-import type { Listener } from "../../../shared/protocol.ts";
+import type { ContainerInfo, Listener } from "../../../shared/protocol.ts";
+import { groupOf } from "./classify.ts";
+import { knownFor, type Known } from "./known.ts";
+import type { Group } from "./settings.ts";
 
 /** Where a listener can be reached from. */
 export type Scope = "local" | "network";
@@ -19,8 +22,14 @@ export interface PortRow {
   addresses: string[];
   scope: Scope;
   startedAt: string | null;
-  /** "host" = reported by the native host, "http" = found by the HTTP fallback probe. */
-  source: "host" | "http";
+  /** "host" = reported by the native host, "http" = found by the HTTP fallback probe,
+   *  "tab" = a browser tab whose server is gone. */
+  source: "host" | "http" | "tab";
+  /** Set when a Docker/OrbStack/Podman container publishes the port. */
+  container: ContainerInfo | null;
+  group: Group;
+  /** Curated explanation for well-known owners (AirPlay Receiver, Docker, Homebrew services…). */
+  known: Known | null;
   /** Page title and status code, only available from the HTTP probe. */
   title?: string | null;
   status?: number;
@@ -145,6 +154,7 @@ export function shapeListeners(listeners: Listener[], home?: string | null): Por
       existing.startedAt ??= l.startedAt;
       existing.project ??= projectFromCwd(l.cwd, home);
       existing.tool ??= detectTool(l.command, l.process);
+      existing.container ??= l.container ?? null;
       continue;
     }
     map.set(key, {
@@ -161,9 +171,20 @@ export function shapeListeners(listeners: Listener[], home?: string | null): Por
       scope: scopeOf(l.address),
       startedAt: l.startedAt,
       source: "host",
+      container: l.container ?? null,
+      group: "dev",
+      known: null,
     });
   }
+  for (const r of map.values()) annotate(r);
   return [...map.values()].sort((a, b) => a.port - b.port || (a.pid ?? 0) - (b.pid ?? 0));
+}
+
+/** Fill in group and known-owner info once a row's fields are final. */
+export function annotate<T extends Omit<PortRow, "group" | "known"> & Partial<Pick<PortRow, "group" | "known">>>(r: T): T & PortRow {
+  r.group = groupOf(r);
+  r.known = knownFor(r);
+  return r as T & PortRow;
 }
 
 /** Number of distinct busy ports (what the toolbar badge shows). */
@@ -187,6 +208,7 @@ export function filterRows(rows: PortRow[], query: string): PortRow[] {
   return rows.filter((r) => {
     const hay = [
       String(r.port), r.process, r.tool, r.project, r.command, r.title, r.scope === "network" ? "network exposed" : "local",
+      r.container?.name, r.container?.image, r.container?.project, r.known?.name, r.known?.tool,
     ]
       .filter(Boolean)
       .join(" ")
