@@ -61,7 +61,8 @@ put() {
 echo "Installing Portlight host ($HOST_NAME)"
 echo "  node       $NODE_BIN ($("$NODE_BIN" --version))"
 
-# 1. Host files.
+# 1. Host files (globs are relative to this script, wherever it is run from).
+cd "$SRC_DIR"
 for f in package.json src/*.js; do
   put "$INSTALL_DIR/$f" "$(cat "$SRC_DIR/$f")"
 done
@@ -99,6 +100,13 @@ install_one() {
 
 WROTE=0
 for_each_browser install_one
+
+# 4. The installed copy must answer, or the extension would only say "not found" later.
+PONG=$("$NODE_BIN" scripts/frame.js '{"id":"install","type":"ping"}' | "$LAUNCHER" | "$NODE_BIN" scripts/frame.js --decode 2>&1 || true)
+case "$PONG" in
+  *'"pong"'*) echo "  verified   host answers ping" ;;
+  *) echo "error: the installed host did not answer a ping:" >&2; echo "$PONG" >&2; exit 1 ;;
+esac
 
 echo
 echo "Manifest:"

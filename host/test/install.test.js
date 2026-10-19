@@ -53,3 +53,26 @@ test("install.sh is idempotent, reports what it wrote, and uninstall.sh removes 
 test("install.sh rejects a malformed extension id", { skip }, () => {
   assert.throws(() => execFileSync(path.join(DIR, "install.sh"), ["not-an-id"], { stdio: "pipe" }), /not a Chrome extension ID/);
 });
+
+test("install.sh works from any directory and the installed host answers", { skip }, () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "portlight home "));
+  const env = { ...process.env, HOME: home, NODE: process.execPath };
+  delete env.XDG_CONFIG_HOME;
+  delete env.XDG_DATA_HOME;
+  const { profile, installDir } = paths(home);
+  fs.mkdirSync(profile, { recursive: true });
+  try {
+    // Run from an unrelated directory: the host files must still be found.
+    const out = execFileSync(path.join(DIR, "install.sh"), [ID], { env, cwd: os.tmpdir(), encoding: "utf8" });
+    assert.match(out, /verified +host answers ping/);
+    for (const f of fs.readdirSync(path.join(DIR, "src"))) {
+      assert.ok(fs.existsSync(path.join(installDir, "src", f)), `installed ${f}`);
+    }
+    const frame = execFileSync(process.execPath, [path.join(DIR, "scripts/frame.js"), '{"id":"t","type":"ping"}']);
+    const raw = execFileSync(path.join(installDir, "portlight-host"), [], { input: frame, env });
+    const res = JSON.parse(raw.subarray(4).toString("utf8"));
+    assert.equal(res.type, "pong");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
