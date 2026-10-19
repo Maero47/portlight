@@ -1,5 +1,6 @@
 import { icon } from "./icons.ts";
-import { HostClient, HostConnectionError, HostRequestError, type HostFailure } from "../lib/host.ts";
+import { HostClient, HostConnectionError, HostRequestError, portTransport, type HostFailure } from "../lib/host.ts";
+import { installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
 import {
   busyPortCount,
   describeScope,
@@ -34,7 +35,9 @@ const FALLBACK_RESCAN_MS = 8000;
 const CACHE_KEY = "portlight.last";
 const DEFAULT_NEAR = 3000;
 
-const host = new HostClient();
+// One host process for as long as the popup is open, instead of one per request.
+const host = new HostClient(portTransport());
+const DEVICE = thisDevice();
 
 const state = {
   mode: "loading" as Mode,
@@ -435,7 +438,7 @@ function updateRow(li: HTMLLIElement, r: PortRow) {
     line2 =
       r.scope === "network"
         ? `<span class="scope network">${icon.network(12)}Network</span>${proc ? `<span class="sep">·</span><span class="proc">${esc(proc)}</span>` : ""}`
-        : `<span class="scope local" title="Only reachable from this Mac">${icon.lock(12)}</span>${proc ? `<span class="proc">${esc(proc)}</span>` : ""}`;
+        : `<span class="scope local" title="Only reachable from ${DEVICE}">${icon.lock(12)}</span>${proc ? `<span class="proc">${esc(proc)}</span>` : ""}`;
   }
   const l2 = li.querySelector<HTMLElement>(".line2")!;
   if (l2.dataset.html !== line2) {
@@ -449,11 +452,11 @@ function updateRow(li: HTMLLIElement, r: PortRow) {
     tool,
     r.process && r.process !== name ? r.process : "",
     r.pid ? `PID ${r.pid}` : "",
-    describeScope(r),
+    describeScope(r, DEVICE),
     describeUptime(r.startedAt) ?? "",
   ].filter(Boolean);
   main.setAttribute("aria-label", `${details.join(", ")}. Open in a new tab.`);
-  main.title = [r.command, r.cwd, describeScope(r)].filter(Boolean).join("\n") || urlFor(r.port);
+  main.title = [r.command, r.cwd, describeScope(r, DEVICE)].filter(Boolean).join("\n") || urlFor(r.port);
 
   const copyBtn = li.querySelector<HTMLElement>('[data-act="copy"]')!;
   copyBtn.setAttribute("aria-label", `Copy ${urlFor(r.port)}`);
@@ -501,7 +504,8 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
   }
   box.innerHTML = html;
   const focusTarget = box.querySelector<HTMLElement>('[data-act="quit"], [data-act="force"], [data-act="cancel"]');
-  if (focusTarget) requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }));
+  // Skip if the panel was dismissed before the frame (e.g. a quick Escape).
+  if (focusTarget) requestAnimationFrame(() => box.dataset.sig === sig && focusTarget.focus({ preventScroll: true }));
   if (c.phase === "pending") li.querySelector<HTMLElement>(".row-main")?.focus({ preventScroll: true });
 }
 
@@ -577,8 +581,13 @@ function extensionId(): string {
   return (typeof chrome !== "undefined" && chrome.runtime?.id) || "<extension-id>";
 }
 
+function installText(): string {
+  const { cmd, args } = installCommand(extensionId(), __PINNED_ID__);
+  return args ? `${cmd} ${args}` : cmd;
+}
+
 function onboardingHtml(): string {
-  const id = esc(extensionId());
+  const { cmd, args } = installCommand(extensionId(), __PINNED_ID__);
   const forbidden = state.failure === "forbidden";
   return `<div class="onboard">
     <div class="onboard-head">
@@ -586,13 +595,13 @@ function onboardingHtml(): string {
       <h2>${forbidden ? "Reconnect the helper" : "Connect the Portlight helper"}</h2>
       <p>${
         forbidden
-          ? "The helper is installed, but for a different extension ID. Run the installer again with this one."
-          : "Chrome can’t see which app owns a port. A small helper reads your Mac’s listening ports and answers only this extension."
+          ? "The helper is installed, but for a different extension ID. Run the installer again to allow this one."
+          : `Chrome can’t see which app owns a port. A small helper reads ${yourDevices()} listening ports and answers only this extension.`
       }</p>
     </div>
     <ol class="steps">
       <li class="step"><span class="step-n">1</span><div class="step-text">In the Portlight folder, run:
-        <div class="code"><code><span class="cmd">host/install.sh</span> ${id}</code>
+        <div class="code"><code><span class="cmd">${esc(cmd)}</span>${args ? ` ${esc(args)}` : ""}</code>
           <button class="icon-btn" type="button" data-act="copy-install" aria-label="Copy install command" title="Copy command">${icon.copy(15)}</button>
         </div></div></li>
       <li class="step"><span class="step-n">2</span><div class="step-text">Come back and check again. <span class="muted">No restart needed.</span></div></li>
@@ -827,7 +836,7 @@ document.addEventListener("click", async (e) => {
       openPort(Number(btn.dataset.port));
       break;
     case "copy-install": {
-      if (await copyText(`host/install.sh ${extensionId()}`)) {
+      if (await copyText(installText())) {
         flashDone(btn, btn, 15);
         announce("Install command copied");
       }

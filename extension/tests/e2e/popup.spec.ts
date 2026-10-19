@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { openPopup, SHOTS } from "./harness.ts";
+import { openPopup, PINNED_ID, SHOTS } from "./harness.ts";
 
 mkdirSync(SHOTS, { recursive: true });
 const shot = (name: string) => resolve(SHOTS, `${name}.png`);
@@ -35,7 +35,7 @@ for (const scheme of ["light", "dark"] as const) {
     test("host missing onboarding", async ({ page }) => {
       const { errors } = await openPopup(page, { scheme, scenario: "missing" });
       await expect(page.locator(".onboard h2")).toHaveText("Connect the Portlight helper");
-      await expect(page.locator(".code code")).toHaveText("host/install.sh kfbnlhcpiodmjcgbmbbfakpjhgnkdmao");
+      await expect(page.locator(".code code")).toHaveText("./install.sh");
       await expect(page.locator("#status-text")).toHaveText("Not connected");
       await page.screenshot({ path: shot(`onboarding-${scheme}`) });
       expect(errors).toEqual([]);
@@ -137,4 +137,37 @@ test("copy URL and suggested port", async ({ page, context }) => {
 test("forbidden host shows the reconnect variant", async ({ page }) => {
   await openPopup(page, { scenario: "forbidden" });
   await expect(page.locator(".onboard h2")).toHaveText("Reconnect the helper");
+});
+
+test("an extension ID other than the pinned one is passed to the installer", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://portlight.test" });
+  const other = "abcdefghijklmnopabcdefghijklmnop";
+  expect(other).not.toBe(PINNED_ID);
+  await openPopup(page, { scenario: "missing", id: other });
+  await expect(page.locator(".code code")).toHaveText(`./install.sh ${other}`);
+  await page.getByRole("button", { name: "Copy install command" }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`./install.sh ${other}`);
+});
+
+test("talks to the host over one connectNative port", async ({ page }) => {
+  await openPopup(page);
+  await expect(page.locator("li.row")).toHaveCount(7);
+  await page.locator("#q").fill("4321");
+  await expect(page.locator("#check")).toContainText("Port 4321 is free");
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__requests.map((r: any) => r.type)))
+    .toEqual(expect.arrayContaining(["list", "check", "suggest"]));
+  expect(await page.evaluate(() => (window as any).__spawns)).toEqual(["connectNative"]);
+});
+
+test.describe("on Linux", () => {
+  test.use({ userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" });
+  test("copy never says Mac", async ({ page }) => {
+    await openPopup(page, { scenario: "missing" });
+    await expect(page.locator(".onboard")).toContainText("this computer’s listening ports");
+    await expect(page.locator(".code code")).toHaveText("./install.sh");
+    await openPopup(page);
+    await expect(page.locator(".scope.local").first()).toHaveAttribute("title", "Only reachable from this computer");
+    expect(await page.locator("body").innerText()).not.toMatch(/\bMac\b/);
+  });
 });

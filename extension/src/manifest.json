@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Portlight",
   "version": "0.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyV/btNMqrZZVnvj1XhyE5Npf9ABkHUBhWRhsu0e2w3XtB9o3GfPR1S3oGjHaRjqsENyWJJf9ez6/6vK7K5W/nhb5CZvC6XU2QqA723/qEB/42oII4gZ6BzqN6tNmCJLuRlJh5h7acwXURknX4UIT2UUZxM4eRDlF5g5TYCPIK0i56MRu7PftnTh3ysX0Tk5wzln754Y8ai2OAwHa8THS/SADld+ksL++YKn6cYOA0xrBogwCUs2Kh9o35mGzjm/AF/nkg3rz5o+a/5dJA74lLvzsWBnMxhjnn7GQtSJH+wYROqOdj8Qzwka+gKutPrdVJRHupu8YlXDUNB9k3YraBwIDAQAB",
   "description": "See which localhost ports are in use, by what, and which are free.",
   "minimum_chrome_version": "116",
   "action": {

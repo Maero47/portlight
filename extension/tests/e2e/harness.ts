@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import type { Page } from "@playwright/test";
+import { pinnedExtensionId } from "../../scripts/extension-id.mjs";
 
 export const ORIGIN = "https://portlight.test";
 export const DIST = resolve(import.meta.dirname, "../../dist");
@@ -15,13 +16,14 @@ const TYPES: Record<string, string> = {
 };
 
 export type Scenario = "list" | "empty" | "missing" | "forbidden";
+export const PINNED_ID = pinnedExtensionId();
 
 /** Serve the built extension from a fake origin and stub chrome.* with a mocked native host. */
 export async function openPopup(
   page: Page,
-  opts: { scenario?: Scenario; scheme?: "light" | "dark"; httpPorts?: Record<number, string> } = {},
+  opts: { scenario?: Scenario; scheme?: "light" | "dark"; httpPorts?: Record<number, string>; id?: string } = {},
 ) {
-  const { scenario = "list", scheme = "light", httpPorts = {} } = opts;
+  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID } = opts;
   const errors: string[] = [];
   page.on("console", (m) => {
     if (m.type() === "error") errors.push(m.text());
@@ -48,13 +50,13 @@ export async function openPopup(
   });
 
   await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
-  await page.addInitScript(mockChrome, { scenario });
+  await page.addInitScript(mockChrome, { scenario, id });
   await page.goto(`${ORIGIN}/popup.html`);
   return { errors };
 }
 
 /** Runs in the page. Keep it self-contained. */
-function mockChrome({ scenario }: { scenario: Scenario }) {
+function mockChrome({ scenario, id }: { scenario: Scenario; id: string }) {
   const now = Date.now();
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const L = (port: number, address: string, process: string, pid: number, cwd: string | null, command: string, startedMin: number) => ({
@@ -76,51 +78,83 @@ function mockChrome({ scenario }: { scenario: Scenario }) {
   const opened: string[] = [];
   (window as any).__opened = opened;
   (window as any).__requests = [];
+  (window as any).__spawns = [];
+  const failure =
+    scenario === "missing"
+      ? "Specified native messaging host not found."
+      : scenario === "forbidden"
+        ? "Access to the specified native messaging host is forbidden."
+        : null;
+  const answer = (msg: any): any => {
+    (window as any).__requests.push(msg);
+    const busy = new Set(listeners.map((l) => l.port));
+    let res: any;
+    switch (msg.type) {
+      case "ping":
+        res = { type: "pong", version: 1, platform: "darwin", hostVersion: "0.1.0" };
+        break;
+      case "list":
+        res = { type: "list", listeners, scannedAt: new Date().toISOString() };
+        break;
+      case "check":
+        res = {
+          type: "check",
+          results: msg.ports.map((p: number) => ({ port: p, free: !busy.has(p), listener: listeners.find((l) => l.port === p) })),
+        };
+        break;
+      case "suggest": {
+        const out: number[] = [];
+        for (let p = msg.near ?? 3000; out.length < (msg.count ?? 1); p++) if (!busy.has(p)) out.push(p);
+        res = { type: "suggest", ports: out };
+        break;
+      }
+      case "kill":
+        listeners = listeners.filter((l) => l.pid !== msg.pid);
+        res = { type: "kill", pid: msg.pid };
+        break;
+    }
+    return { id: msg.id, ok: true, ...res };
+  };
   const runtime: any = {
-    id: "kfbnlhcpiodmjcgbmbbfakpjhgnkdmao",
+    id,
     lastError: undefined,
     sendNativeMessage(_host: string, msg: any, cb: (r: any) => void) {
-      (window as any).__requests.push(msg);
+      (window as any).__spawns.push("sendNativeMessage");
       setTimeout(() => {
-        if (scenario === "missing" || scenario === "forbidden") {
-          runtime.lastError = {
-            message:
-              scenario === "missing"
-                ? "Specified native messaging host not found."
-                : "Access to the specified native messaging host is forbidden.",
-          };
+        if (failure) {
+          runtime.lastError = { message: failure };
           cb(undefined);
           runtime.lastError = undefined;
           return;
         }
-        const busy = new Set(listeners.map((l) => l.port));
-        let res: any;
-        switch (msg.type) {
-          case "ping":
-            res = { type: "pong", version: 1, platform: "darwin", hostVersion: "0.1.0" };
-            break;
-          case "list":
-            res = { type: "list", listeners, scannedAt: new Date().toISOString() };
-            break;
-          case "check":
-            res = {
-              type: "check",
-              results: msg.ports.map((p: number) => ({ port: p, free: !busy.has(p), listener: listeners.find((l) => l.port === p) })),
-            };
-            break;
-          case "suggest": {
-            const out: number[] = [];
-            for (let p = msg.near ?? 3000; out.length < (msg.count ?? 1); p++) if (!busy.has(p)) out.push(p);
-            res = { type: "suggest", ports: out };
-            break;
-          }
-          case "kill":
-            listeners = listeners.filter((l) => l.pid !== msg.pid);
-            res = { type: "kill", pid: msg.pid };
-            break;
-        }
-        cb({ id: msg.id, ok: true, ...res });
+        cb(answer(msg));
       }, 15);
+    },
+    connectNative(_host: string) {
+      (window as any).__spawns.push("connectNative");
+      const onMsg: ((m: any) => void)[] = [];
+      const onDisc: (() => void)[] = [];
+      let open = true;
+      const drop = () => {
+        if (!open) return;
+        open = false;
+        runtime.lastError = { message: failure };
+        onDisc.forEach((f) => f());
+        runtime.lastError = undefined;
+      };
+      if (failure) setTimeout(drop, 15);
+      return {
+        onMessage: { addListener: (f: (m: any) => void) => onMsg.push(f) },
+        onDisconnect: { addListener: (f: () => void) => onDisc.push(f) },
+        postMessage(msg: any) {
+          if (!open) throw new Error("Attempting to use a disconnected port object");
+          if (failure) return;
+          setTimeout(() => open && onMsg.forEach((f) => f(answer(msg))), 15);
+        },
+        disconnect() {
+          open = false;
+        },
+      };
     },
   };
   const chromeStub = {

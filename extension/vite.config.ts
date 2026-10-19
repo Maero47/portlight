@@ -1,10 +1,12 @@
 import { defineConfig } from "vitest/config";
 import { resolve } from "node:path";
+import { pinnedExtensionId } from "./scripts/extension-id.mjs";
 
 export default defineConfig({
   root: resolve(import.meta.dirname, "src"),
   base: "./",
   publicDir: false,
+  define: { __PINNED_ID__: JSON.stringify(pinnedExtensionId()) },
   build: {
     outDir: resolve(import.meta.dirname, "dist"),
     emptyOutDir: true,

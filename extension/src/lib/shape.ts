@@ -40,8 +40,8 @@ export function isWildcard(address: string): boolean {
 }
 
 /** Human description of where a row is reachable, used for tooltips and screen readers. */
-export function describeScope(row: Pick<PortRow, "scope" | "addresses">): string {
-  if (row.scope === "local") return "Only reachable from this Mac";
+export function describeScope(row: Pick<PortRow, "scope" | "addresses">, device = "this computer"): string {
+  if (row.scope === "local") return `Only reachable from ${device}`;
   if (row.addresses.some(isWildcard)) return "Listening on all interfaces — reachable from your network";
   return `Reachable on ${row.addresses.join(", ")}`;
 }

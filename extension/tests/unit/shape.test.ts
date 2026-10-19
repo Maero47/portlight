@@ -35,7 +35,8 @@ describe("scopeOf", () => {
   it("describes wildcard exposure", () => {
     expect(describeScope({ scope: "network", addresses: ["0.0.0.0"] })).toMatch(/all interfaces/);
     expect(describeScope({ scope: "network", addresses: ["192.168.1.2"] })).toBe("Reachable on 192.168.1.2");
-    expect(describeScope({ scope: "local", addresses: ["::1"] })).toMatch(/this Mac/);
+    expect(describeScope({ scope: "local", addresses: ["::1"] })).toBe("Only reachable from this computer");
+    expect(describeScope({ scope: "local", addresses: ["::1"] }, "this Mac")).toBe("Only reachable from this Mac");
   });
 });
 

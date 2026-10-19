@@ -5,3 +5,5 @@ dist/
 .yonet/
 CLAUDE.md
 AGENTS.md
+.keys/
+*.pem

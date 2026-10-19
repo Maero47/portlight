@@ -32,12 +32,69 @@ export function classifyNativeError(message: string | undefined): HostFailure {
   return "unavailable";
 }
 
-export type Transport = (msg: Request) => Promise<Response>;
+export interface Transport {
+  (msg: Request): Promise<Response>;
+  /** Drop the connection, e.g. after a timeout, so the next request starts a fresh host. */
+  reset?: () => void;
+}
 
 let seq = 0;
 const nextId = () => `${Date.now().toString(36)}-${(++seq).toString(36)}`;
 
-/** Default transport: one short-lived host process per request via sendNativeMessage. */
+/**
+ * One long-lived host process per page via connectNative. Requests are matched to
+ * responses by id. The host exits when the page goes away (Chrome closes its stdin).
+ * Falls back to one process per request where connectNative is missing.
+ */
+export function portTransport(): Transport {
+  let port: chrome.runtime.Port | null = null;
+  const pending = new Map<string, { resolve: (r: Response) => void; reject: (e: Error) => void }>();
+
+  const fail = (err: Error) => {
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+  };
+
+  const connect = (): chrome.runtime.Port => {
+    if (port) return port;
+    const p = chrome.runtime.connectNative(HOST_NAME);
+    p.onMessage.addListener((res: Response) => {
+      const waiter = res && pending.get(res.id);
+      if (!waiter) return;
+      pending.delete(res.id);
+      waiter.resolve(res);
+    });
+    p.onDisconnect.addListener(() => {
+      const message = chrome.runtime.lastError?.message;
+      if (port === p) port = null;
+      fail(new HostConnectionError(message ? classifyNativeError(message) : "crashed", message ?? "The host closed the connection."));
+    });
+    return (port = p);
+  };
+
+  const send: Transport = (msg) => {
+    if (typeof chrome === "undefined" || !chrome.runtime?.connectNative) return chromeTransport(msg);
+    return new Promise((resolve, reject) => {
+      pending.set(msg.id, { resolve, reject });
+      try {
+        connect().postMessage(msg);
+      } catch (e) {
+        pending.delete(msg.id);
+        port = null;
+        reject(new HostConnectionError("unavailable", e instanceof Error ? e.message : String(e)));
+      }
+    });
+  };
+  send.reset = () => {
+    const p = port;
+    port = null;
+    p?.disconnect();
+    fail(new HostConnectionError("timeout", "The host did not answer in time."));
+  };
+  return send;
+}
+
+/** One short-lived host process per request via sendNativeMessage. */
 export const chromeTransport: Transport = (msg) =>
   new Promise((resolve, reject) => {
     if (typeof chrome === "undefined" || !chrome.runtime?.sendNativeMessage) {
@@ -63,7 +120,10 @@ export class HostClient {
     const msg = { ...body, id: nextId() } as Request;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new HostConnectionError("timeout", "The host did not answer in time.")), this.timeoutMs);
+      timer = setTimeout(() => {
+        reject(new HostConnectionError("timeout", "The host did not answer in time."));
+        this.transport.reset?.();
+      }, this.timeoutMs);
     });
     try {
       const res = await Promise.race([this.transport(msg), timeout]);
