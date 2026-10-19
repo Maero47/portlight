@@ -368,6 +368,7 @@ export function createHandler(overrides = {}) {
     }
   }
   /** Stop everything the host started that outlives a request (share-link tunnels). */
-  handle.close = () => deps.tunnels?.stopAll();
+  // `force` on host exit: kill tunnel processes synchronously (see stopAll).
+  handle.close = ({ force = false } = {}) => deps.tunnels?.stopAll({ force });
   return handle;
 }

@@ -91,7 +91,9 @@ shell), from a binary named exactly `cloudflared` or `ngrok` on PATH or in the u
 locations. A start registers its port as `starting` before the port check runs, so `tunnelStop`
 cancels it at any point: before the binary is spawned (nothing starts), after (the process is killed),
 or as the URL arrives (it is never returned); the start then fails with `cancelled`. A tunnel stops when asked, when its port stops listening (checked every 5 s, two misses
-in a row), and when the host exits (stdin closed, SIGTERM/SIGINT/SIGHUP or normal exit). If the host
+in a row), and when the host exits (stdin closed, SIGTERM/SIGINT/SIGHUP or normal exit). A normal stop
+sends SIGTERM (cloudflared runs with `--grace-period 1s`) and SIGKILL 2 s later; on host exit every tunnel
+child, including ones still shutting down, gets SIGKILL synchronously, since no timer survives the exit. If the host
 is killed with SIGKILL its tunnel can outlive it, since macOS has no "die with parent". The extension
 runs share links from its background worker, which keeps one host connection open only while a
 tunnel runs.

@@ -44,10 +44,11 @@ process.stdin.on("data", (chunk) => {
 });
 
 // Share-link tunnels are our children: they never outlive the host.
-process.on("exit", () => handle.close());
+// Every exit path ends here: SIGKILL whatever is left, synchronously — no timer survives exit.
+process.on("exit", () => handle.close({ force: true }));
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
   process.on(sig, () => {
-    handle.close();
+    handle.close({ force: true });
     process.exit(128);
   });
 }

@@ -222,7 +222,7 @@ test("share link: created through the background worker, survives the popup clos
   await expect(api.locator(".url-line code")).toHaveText(FAKE_URL, { timeout: 15_000 });
   await expect(api.locator(".shared")).toHaveText("Public");
   const run = fakeRun();
-  expect(run.argv).toEqual(["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${servers.api.port}`, "--http-host-header", `127.0.0.1:${servers.api.port}`]);
+  expect(run.argv).toEqual(["tunnel", "--no-autoupdate", "--grace-period", "1s", "--url", `http://127.0.0.1:${servers.api.port}`, "--http-host-header", `127.0.0.1:${servers.api.port}`]);
   expect(alive(run.pid)).toBe(true);
 
   // Closing the popup (and its helper) leaves the tunnel running in the worker's helper.

@@ -56,7 +56,7 @@ test("only cloudflared and ngrok, cloudflared preferred", () => {
 
 test("argv: fixed flags, numeric target, host header rewritten for dev servers", () => {
   assert.deepEqual(PROVIDERS.cloudflared.args("http://127.0.0.1:5173", "127.0.0.1:5173"), [
-    "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:5173", "--http-host-header", "127.0.0.1:5173",
+    "tunnel", "--no-autoupdate", "--grace-period", "1s", "--url", "http://127.0.0.1:5173", "--http-host-header", "127.0.0.1:5173",
   ]);
   assert.deepEqual(PROVIDERS.ngrok.args("http://[::1]:3000", "[::1]:3000"), [
     "http", "http://[::1]:3000", "--host-header=rewrite", "--log", "stdout", "--log-format", "logfmt",
@@ -276,4 +276,31 @@ test("a failed port check frees the port for the next try", async () => {
   const p = mgr.start(3000, "127.0.0.1");
   (await at(0)).child.stderr.write(CF_BANNER);
   assert.equal((await p).state, "running");
+});
+
+test("stopAll({ force }) SIGKILLs every child synchronously: running, starting, and already stopping", async () => {
+  const { mgr, at } = setup();
+  const a = mgr.start(3000, "127.0.0.1");
+  const b = mgr.start(4000, "127.0.0.1");
+  const c = mgr.start(5000, "127.0.0.1");
+  const [ca, cb, cc] = [(await at(0)).child, (await at(1)).child, (await at(2)).child];
+  for (const child of [ca, cb, cc]) child.kill = (sig) => (child.signals.push(sig), true); // ignores SIGTERM, like cloudflared draining
+  ca.stderr.write(CF_BANNER);
+  await a;
+  mgr.stop(5000); // stopped just before the host exits: SIGTERM sent, still alive
+  mgr.stopAll({ force: true });
+  assert.deepEqual(ca.signals, ["SIGTERM", "SIGKILL"], "running");
+  assert.deepEqual(cb.signals, ["SIGTERM", "SIGKILL"], "starting");
+  assert.deepEqual(cc.signals, ["SIGTERM", "SIGKILL"], "stopping");
+  await Promise.allSettled([b, c]);
+});
+
+test("a plain stopAll leaves the SIGKILL to the grace timer", async () => {
+  const { mgr, at } = setup();
+  const p = mgr.start(3000, "127.0.0.1");
+  const { child } = await at(0);
+  child.kill = (sig) => (child.signals.push(sig), true);
+  mgr.stopAll();
+  assert.deepEqual(child.signals, ["SIGTERM"]);
+  await p.catch(() => {});
 });

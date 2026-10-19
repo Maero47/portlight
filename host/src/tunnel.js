@@ -19,7 +19,8 @@ const MAX_LOG = 16 * 1024;
 export const PROVIDERS = Object.freeze({
   cloudflared: {
     label: "cloudflared",
-    args: (target, hostPort) => ["tunnel", "--no-autoupdate", "--url", target, "--http-host-header", hostPort],
+    // --grace-period: cloudflared otherwise waits up to 30 s for open requests after SIGTERM.
+    args: (target, hostPort) => ["tunnel", "--no-autoupdate", "--grace-period", "1s", "--url", target, "--http-host-header", hostPort],
     url: (text) => {
       for (const m of text.matchAll(/https:\/\/([a-z0-9-]+)\.trycloudflare\.com\b/g)) {
         if (m[1] !== "api") return m[0];
@@ -84,21 +85,31 @@ export function createTunnelManager({
     return [...tunnels.values()].map(view);
   }
 
-  function kill(t) {
-    if (!t.child) return; // cancelled before it was spawned
-    if (t.child.exitCode !== null || t.child.signalCode !== null) return;
+  /** Children sent SIGTERM that haven't exited yet; a forced shutdown must reach them too. */
+  const dying = new Set();
+  const exited = (c) => c.exitCode !== null || c.signalCode !== null;
+
+  function hardKill(child) {
     try {
-      t.child.kill("SIGTERM");
+      if (!exited(child)) child.kill("SIGKILL");
+    } catch {
+      /* gone */
+    }
+  }
+
+  function kill(t) {
+    const child = t.child;
+    if (!child || exited(child)) return; // never spawned (cancelled early), or already gone
+    try {
+      child.kill("SIGTERM");
     } catch {
       /* already gone */
     }
-    const force = setTimeout(() => {
-      try {
-        if (t.child.exitCode === null && t.child.signalCode === null) t.child.kill("SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }, STOP_GRACE_MS);
+    dying.add(child);
+    child.once?.("exit", () => dying.delete(child));
+    // Normal stops get a grace period. This timer dies with the host, which is why
+    // stopAll({ force: true }) exists for exit paths.
+    const force = setTimeout(() => hardKill(child), STOP_GRACE_MS);
     force.unref?.();
   }
 
@@ -111,8 +122,15 @@ export function createTunnelManager({
     return true;
   }
 
-  function stopAll() {
+  /**
+   * Stop every tunnel. With `force` (host exit) every child — running, starting, or already
+   * told to stop and still in its grace period — gets SIGKILL synchronously, because no timer
+   * survives process.exit and a SIGTERMed cloudflared could otherwise outlive the host.
+   */
+  function stopAll({ force = false } = {}) {
+    const children = [...tunnels.values()].map((t) => t.child).filter(Boolean);
     for (const port of [...tunnels.keys()]) stop(port);
+    if (force) for (const child of new Set([...children, ...dying])) hardKill(child);
   }
 
   // A tunnel to a server that has stopped only serves errors: close it after two misses in a row.

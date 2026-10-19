@@ -25,6 +25,8 @@ fs.writeFileSync(${JSON.stringify(path.join(dir, "argv.json"))}, JSON.stringify(
 process.stderr.write("INF Requesting new quick Tunnel on trycloudflare.com...\\n");
 // Real quick tunnels take seconds to print their URL; PORTLIGHT_FAKE_CF_DELAY_MS sets how long.
 setTimeout(() => process.stderr.write("INF |  https://fake-quick-tunnel-test.trycloudflare.com  |\\n"), Number(process.env.PORTLIGHT_FAKE_CF_DELAY_MS ?? 150));
+// Like a cloudflared still draining connections: PORTLIGHT_FAKE_CF_IGNORE_TERM makes it ignore SIGTERM.
+if (process.env.PORTLIGHT_FAKE_CF_IGNORE_TERM) process.on("SIGTERM", () => {});
 setInterval(() => {}, 1000);
 `,
     { mode: 0o755 },
@@ -89,7 +91,7 @@ test("tunnel lifecycle with a fake cloudflared", { skip: !supported, timeout: 30
     assert.equal(started.tunnel.url, "https://fake-quick-tunnel-test.trycloudflare.com");
     assert.equal(started.tunnel.provider, "cloudflared");
     const { argv, pid } = JSON.parse(fs.readFileSync(path.join(dir, "argv.json"), "utf8"));
-    assert.deepEqual(argv, ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`, "--http-host-header", `127.0.0.1:${port}`]);
+    assert.deepEqual(argv, ["tunnel", "--no-autoupdate", "--grace-period", "1s", "--url", `http://127.0.0.1:${port}`, "--http-host-header", `127.0.0.1:${port}`]);
     assert.ok(alive(pid));
     assert.equal((await host.request({ type: "tunnelStatus" })).tunnels.length, 1);
 
@@ -181,6 +183,38 @@ test("cancel at every phase: afterwards no tunnel process runs and no URL is rep
     await new Promise((r) => server.close(r));
   }
 });
+
+for (const how of ["stdin closes", "stdin closes right after a stop", "SIGTERM"]) {
+  test(`host exit (${how}) kills a tunnel that ignores SIGTERM, right away`, { skip: !supported, timeout: 20_000 }, async () => {
+    const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, PORTLIGHT_FAKE_CF_IGNORE_TERM: "1" };
+    const server = await listen();
+    const { port } = server.address();
+    const host = startHost(env);
+    let pid;
+    try {
+      const started = await host.request({ type: "tunnelStart", port });
+      assert.equal(started.ok, true, JSON.stringify(started));
+      pid = JSON.parse(fs.readFileSync(path.join(dir, "argv.json"), "utf8")).pid;
+      if (how === "stdin closes right after a stop") {
+        // Stopped, still "draining" (SIGTERM ignored), and then the browser goes away.
+        assert.equal((await host.request({ type: "tunnelStop", port })).stopped, true);
+        await new Promise((r) => setTimeout(r, 100));
+        assert.ok(alive(pid), "still draining before the host exits");
+      }
+      if (how === "SIGTERM") host.child.kill("SIGTERM");
+      else host.child.stdin.end();
+      assert.ok(await until(() => host.child.exitCode !== null || host.child.signalCode !== null), "host exits");
+      const exitedAt = Date.now();
+      // Well inside the 2 s grace timer: that timer dies with the host, so only the synchronous SIGKILL can do this.
+      assert.ok(await until(() => !alive(pid), 600), `tunnel ${pid} outlived the host`);
+      assert.ok(Date.now() - exitedAt < 600);
+    } finally {
+      if (pid && alive(pid)) process.kill(pid, "SIGKILL");
+      host.child.kill();
+      await new Promise((r) => server.close(r));
+    }
+  });
+}
 
 test("tunnelStart refuses a port nobody listens on, without starting anything", { skip: !supported }, async () => {
   const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` };
