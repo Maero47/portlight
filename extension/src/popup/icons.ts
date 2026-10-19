@@ -28,4 +28,11 @@ export const icon = {
     wrap(`<circle cx="10" cy="10" r="1.4" fill="currentColor" stroke="none"/><path d="M6.6 6.6a4.8 4.8 0 0 0 0 6.8M13.4 6.6a4.8 4.8 0 0 1 0 6.8"/><path d="M4.1 4.1a8.35 8.35 0 0 0 0 11.8M15.9 4.1a8.35 8.35 0 0 1 0 11.8"/>`, s),
   chevron: (s?: number) => wrap(`<path d="m8 5.5 4.5 4.5L8 14.5"/>`, s),
   back: (s?: number) => wrap(`<path d="M12 5.5 7.5 10l4.5 4.5"/>`, s),
+  gear: (s?: number) => wrap(`<path d="M15.20 8.21 L16.92 8.40 L16.92 11.60 L15.20 11.79 L14.94 12.41 L16.02 13.76 L13.76 16.02 L12.41 14.94 L11.79 15.20 L11.60 16.92 L8.40 16.92 L8.21 15.20 L7.59 14.94 L6.24 16.02 L3.98 13.76 L5.06 12.41 L4.80 11.79 L3.08 11.60 L3.08 8.40 L4.80 8.21 L5.06 7.59 L3.98 6.24 L6.24 3.98 L7.59 5.06 L8.21 4.80 L8.40 3.08 L11.60 3.08 L11.79 4.80 L12.41 5.06 L13.76 3.98 L16.02 6.24 L14.94 7.59Z"/><circle cx="10" cy="10" r="2.25"/>`, s),
+  more: (s?: number) =>
+    wrap(`<circle cx="5.25" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="14.75" cy="10" r="1.15" fill="currentColor" stroke="none"/>`, s),
+  info: (s?: number) =>
+    wrap(`<circle cx="10" cy="10" r="6.75"/><path d="M10 9.25v4.25"/><circle cx="10" cy="6.6" r=".6" fill="currentColor"/>`, s),
+  tab: (s?: number) => wrap(`<rect x="3" y="4.75" width="14" height="10.5" rx="2.25"/><path d="M3 8.25h14M6 4.75v3.5"/>`, s),
+  xmark: (s?: number) => wrap(`<path d="M6 6l8 8M14 6l-8 8"/>`, s),
 };

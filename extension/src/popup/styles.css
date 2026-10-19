@@ -40,7 +40,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1c1c1e;
     --raised: #2c2c2e;
     --fill: rgba(118, 118, 128, 0.24);
@@ -63,6 +63,35 @@
     --shadow-raised: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3);
     --code-bg: #242426;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1c1c1e;
+  --raised: #2c2c2e;
+  --fill: rgba(118, 118, 128, 0.24);
+  --fill-strong: rgba(118, 118, 128, 0.34);
+  --hover: #2a2a2d;
+  --press: #333336;
+  --hairline: rgba(255, 255, 255, 0.09);
+  --label: #f5f5f7;
+  --label-2: #a1a1a6;
+  --label-3: #6e6e73;
+  --accent: #0a84ff;
+  --accent-text: #3b9eff;
+  --green: #30d158;
+  --green-text: #4ad66d;
+  --orange: #ff9f0a;
+  --orange-text: #ffb340;
+  --red: #ff453a;
+  --red-text: #ff6961;
+  --focus: rgba(10, 132, 255, 0.7);
+  --shadow-raised: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --code-bg: #242426;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 * {
@@ -169,7 +198,7 @@ kbd.keycap {
 
 .titlebar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   margin: 0 2px 10px;
 }
@@ -335,6 +364,10 @@ kbd.keycap {
 
 .check[data-state="used"] .check-dot {
   background: var(--orange);
+}
+
+.check-copy {
+  min-width: 0;
 }
 
 .check-title {
@@ -673,8 +706,7 @@ kbd.keycap {
 }
 
 .confirm-content {
-  display: flex;
-  align-items: center;
+  display: grid;
   gap: 8px;
   padding: 2px 8px 10px 82px;
   opacity: 0;
@@ -1002,7 +1034,277 @@ kbd.keycap {
   display: none;
 }
 
+/* ---------- titlebar gear ---------- */
+
+.titlebar-end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: -6px;
+}
+
+.icon-btn.gear {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+/* ---------- groups & hidden ---------- */
+
+.section-label {
+  padding: 12px 10px 3px;
+}
+
+.rows > .section-label:first-child {
+  padding-top: 4px;
+}
+
+.more {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 2px;
+}
+
+.more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  font-size: 11.5px;
+  color: var(--label-2);
+  transition: background-color var(--fast) ease, color var(--fast) ease;
+}
+
+.more-btn:hover {
+  background: var(--fill);
+  color: var(--label);
+}
+
+.more-act {
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+/* A hidden row shown by search or "Show": still usable, but clearly set aside. */
+.row.is-hidden .row-main > * {
+  opacity: 0.5;
+}
+
+.row.is-hidden:hover .row-main > *,
+.row.is-hidden:focus-within .row-main > * {
+  opacity: 0.8;
+}
+
+/* ---------- tabs ---------- */
+
+.tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+
+.tabs .glyph {
+  color: var(--accent);
+}
+
+.idle {
+  flex: none;
+  color: var(--label-3);
+}
+
+.row.stopped .port,
+.row.stopped .name {
+  color: var(--label-2);
+}
+
+.row.stopped .name {
+  font-weight: 500;
+}
+
+.gone-label {
+  flex: none;
+  color: var(--label-2);
+}
+
+/* ---------- explanations ---------- */
+
+.confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.confirm-row.end {
+  justify-content: flex-end;
+}
+
+.explain,
+.confirm-note {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.42;
+  color: var(--label-2);
+  text-wrap: pretty;
+  user-select: text;
+}
+
+.explain p {
+  margin: 0;
+}
+
+.explain-lead {
+  color: var(--label);
+  font-weight: 500;
+}
+
+.explain-fix {
+  color: var(--label);
+}
+
+.cmd-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 3px 3px 9px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  box-shadow: inset 0 0 0 0.5px var(--hairline);
+}
+
+.cmd-line code {
+  flex: 1;
+  min-width: 0;
+  font: 11px/1.4 var(--mono);
+  color: var(--label);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.cmd-line .icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.check-note {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--label);
+  text-wrap: pretty;
+}
+
+/* ---------- row menu ---------- */
+
+.menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 190px;
+  max-width: 260px;
+  padding: 5px;
+  border-radius: 10px;
+  background: var(--raised);
+  box-shadow: 0 0 0 0.5px var(--hairline), 0 8px 24px rgba(0, 0, 0, 0.14), 0 2px 6px rgba(0, 0, 0, 0.08);
+  font-size: 13px;
+}
+
+.menu.in {
+  animation: menu-in 160ms var(--ease-out) both;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 5px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.menu-item > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menu-item:hover,
+.menu-item:focus {
+  background: var(--accent);
+  color: var(--on-accent);
+  outline: none;
+}
+
+.menu-item.danger {
+  color: var(--red-text);
+}
+
+.menu-item.danger:hover,
+.menu-item.danger:focus {
+  background: var(--red);
+  color: #fff;
+}
+
+.menu-hint {
+  font-size: 12px;
+  color: var(--label-3);
+}
+
+.menu-item:hover .menu-hint,
+.menu-item:focus .menu-hint {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 9px;
+  background: var(--hairline);
+}
+
+.row.menu-open .row-main {
+  background: var(--hover);
+}
+
+.row.menu-open .actions {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.row.menu-open .uptime {
+  opacity: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .menu {
+    box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 10px 28px rgba(0, 0, 0, 0.5);
+  }
+}
+
+:root[data-theme="dark"] .menu {
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+
 /* ---------- motion ---------- */
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
 
 @keyframes rise {
   from {
@@ -1031,9 +1333,9 @@ kbd.keycap {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
   }
@@ -1052,6 +1354,29 @@ kbd.keycap {
   .suggest-pill:active {
     transform: none;
   }
+}
+
+/* The "Reduced" motion setting behaves like the system preference. */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+}
+:root[data-motion="reduced"] .row,
+:root[data-motion="reduced"] .actions,
+:root[data-motion="reduced"] .confirm {
+  transition-property: opacity, background-color !important;
+}
+:root[data-motion="reduced"] .row.entering,
+:root[data-motion="reduced"] .row.leaving,
+:root[data-motion="reduced"] .actions {
+  transform: none !important;
+}
+:root[data-motion="reduced"] .btn:active,
+:root[data-motion="reduced"] .icon-btn:active,
+:root[data-motion="reduced"] .suggest-pill:active {
+  transform: none;
 }
 
 @media (prefers-contrast: more) and (prefers-color-scheme: light) {

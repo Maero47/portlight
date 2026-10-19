@@ -23,6 +23,11 @@ export class HostRequestError extends Error {
   }
 }
 
+/** An older host that doesn't know a request type answers bad_request ("unknown request type"). */
+export function isUnsupported(e: unknown): boolean {
+  return e instanceof HostRequestError && e.code === "bad_request";
+}
+
 /** Map chrome.runtime.lastError messages onto something the UI can act on. */
 export function classifyNativeError(message: string | undefined): HostFailure {
   const m = (message ?? "").toLowerCase();
@@ -146,7 +151,14 @@ export class HostClient {
   suggest(near?: number, count = 1) {
     return this.request<"suggest">({ type: "suggest", near, count });
   }
-  kill(pid: number, signal: "TERM" | "KILL" = "TERM") {
-    return this.request<"kill">({ type: "kill", pid, signal });
+  /** `tree` also signals the process's children (npm → node → esbuild), so the port really frees up. */
+  kill(pid: number, signal: "TERM" | "KILL" = "TERM", tree = true) {
+    return this.request<"kill">({ type: "kill", pid, signal, tree });
+  }
+  reveal(pid: number) {
+    return this.request<"reveal">({ type: "reveal", pid });
+  }
+  openEditor(pid: number, editor: string) {
+    return this.request<"openEditor">({ type: "openEditor", pid, editor });
   }
 }

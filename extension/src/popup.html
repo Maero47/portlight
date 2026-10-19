@@ -12,7 +12,10 @@
       <header class="chrome" id="chrome">
         <div class="titlebar">
           <h1 class="title">Portlight</h1>
-          <p class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Looking…</span></p>
+          <div class="titlebar-end">
+            <p class="status" id="status"><span class="live-dot" aria-hidden="true"></span><span id="status-text">Looking…</span></p>
+            <button class="icon-btn gear" id="gear" type="button" data-act="settings" aria-label="Settings" title="Settings"><span data-icon="gear"></span></button>
+          </div>
         </div>
         <div class="search" id="search-wrap">
           <span class="search-glyph" data-icon="search"></span>
@@ -54,6 +57,7 @@
         </div>
       </footer>
     </div>
+    <div class="menu" id="menu" role="menu" hidden></div>
     <div class="sr-only" id="announcer" aria-live="polite"></div>
     <script type="module" src="./popup/main.ts"></script>
   </body>

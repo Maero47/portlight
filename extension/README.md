@@ -17,14 +17,39 @@ For everyday use, run `./install.sh` in the repository root instead.
 
 - `src/popup/` — the popup. Plain TypeScript and CSS, no framework, so it paints instantly.
   The last list is cached locally and shown on open while a fresh one loads.
-- `src/background.ts` — keeps the toolbar badge (busy-port count) up to date every 30 s.
+- `src/background.ts` — keeps the toolbar badge up to date every 30 s. It counts only the groups chosen
+  in settings (`badgeGroups`, default dev servers, databases and containers) and skips hidden ports.
+- `src/lib/classify.ts` — sorts each listener into a group: dev server, database, container, app or system
+  (ControlCenter, rapportd, launchd, systemd, Windows services…).
+- `src/lib/known.ts` — a small curated knowledge base: AirPlay Receiver on 5000/7000, Continuity, Remote
+  Login, Docker's port proxy, containers, Homebrew services, Figma Agent… For owners that the OS restarts
+  (or where quitting would stop all of Docker), Quit is replaced by an explanation and, where there is
+  one, the right command (`docker stop shop-db-1`, `brew services stop postgresql@16`).
+- `src/lib/view.ts` — hiding rules (`hideSystem`, `hiddenPorts`, `hiddenProcesses`), the badge count,
+  tab ↔ port mapping and idle detection. Pure functions, unit tested.
+- `src/lib/tabs.ts` — finds tabs open on `http://localhost` / `http://127.0.0.1`. Clicking a port that
+  already has a tab switches to it (and its window) instead of opening a duplicate; tabs whose server
+  has stopped get their own section with Switch and Close. No `tabs` permission: the existing host
+  permissions are what let `tabs.query` match those URLs.
+- Settings come from `src/lib/settings.ts` (`chrome.storage.sync`). The popup applies them live, and
+  caches them locally so the first paint already uses the right theme and hiding rules.
 - `src/lib/host.ts` — talks to the native host `com.portlight.host` using `shared/protocol.ts`.
   The popup holds one `connectNative` port while open (measured: `list` 105 → 68 ms median,
   `ping` 52 → 1 ms, and no process spawned every 2 s); the badge worker uses one-off
   `sendNativeMessage` calls so it never keeps the service worker alive.
 - `src/lib/platform.ts` — "this Mac" vs "this computer", and the install command onboarding shows.
-- `src/lib/probe.ts` — fallback when the host is missing: probes common dev ports over HTTP.
-  Results are labelled "HTTP only"; databases and other non-HTTP services are invisible this way.
+- `src/lib/probe.ts` — fallback when the host is missing: probes common dev ports, the user's
+  `extraProbePorts` and any port open in a tab over HTTP. Results are labelled "HTTP only"; databases and
+  other non-HTTP services are invisible this way. AirPlay Receiver is recognised by its `Server: AirTunes`
+  header and treated as a system port.
+
+### Chrome Local Network Access
+
+The HTTP fallback fetches `http://localhost:PORT` from the extension page. Checked on Chromium 156 with
+LNA as shipped and with `--enable-features=LocalNetworkAccessChecks:LocalNetworkAccessChecksWarn/false`:
+the requests go through with no prompt, because the manifest's `http://localhost/*` and
+`http://127.0.0.1/*` host permissions cover them. No new permission is needed.
+`tests/e2e/lna.spec.ts` keeps checking it (fallback scan, direct fetch, tab linking) in both modes.
 - `scripts/finalize.mjs` — writes `dist/manifest.json` and copies icons from `../assets/icons`.
 - `scripts/extension-id.mjs`, `scripts/keygen.mjs` — the manifest `key` pins the extension ID
   (see the root README).
@@ -35,9 +60,10 @@ For everyday use, run `./install.sh` in the repository root instead.
 | --- | --- |
 | `⌘K` or `/` | Focus search |
 | `↑` `↓` | Move between ports |
-| `↩` | Open `http://localhost:PORT` |
+| `↩` | Switch to the tab showing that port, or open `http://localhost:PORT` |
 | `⌘C` | Copy URL of the focused port |
-| `⌘⌫` / `Delete` | Quit the focused process (asks first) |
+| `⌘⌫` / `Delete` | Quit the focused process (asks first), or explain why it can't be quit |
+| `⇧F10`, menu key or right-click | Row menu: Reveal in Finder, Open in editor, Hide port / app, Quit |
 | `Esc` | Cancel, clear search, then close |
 
 Typing a number in search checks that port and suggests the nearest free one.

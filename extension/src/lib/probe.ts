@@ -1,4 +1,4 @@
-import type { PortRow } from "./shape.ts";
+import { annotate, type PortRow } from "./shape.ts";
 
 /**
  * HTTP-only fallback used when the native host is not installed.
@@ -27,6 +27,8 @@ export interface ProbeResult {
   open: boolean;
   status?: number;
   title?: string | null;
+  /** The Server response header, e.g. "AirTunes/980.77.5" for macOS AirPlay Receiver. */
+  server?: string | null;
 }
 
 export type Fetcher = (url: string, init: RequestInit) => Promise<Response>;
@@ -91,7 +93,8 @@ export async function probePort(port: number, fetcher: Fetcher = fetch, timeoutM
         /* body unreadable — still open */
       }
     }
-    return { port, open: true, status: res.status, title };
+    const server = res.headers?.get?.("server");
+    return { port, open: true, status: res.status, title, ...(server ? { server } : {}) };
   } catch {
     return { port, open: false };
   } finally {
@@ -120,7 +123,9 @@ export async function probePorts(
 }
 
 export function probeToRow(r: ProbeResult): PortRow {
-  return {
+  // AirPlay Receiver answers 403 with "Server: AirTunes": name it like the helper would.
+  const airplay = /^AirTunes\b/i.test(r.server ?? "");
+  const row: PortRow = {
     key: `${r.port}:http`,
     port: r.port,
     pid: null,
@@ -136,5 +141,13 @@ export function probeToRow(r: ProbeResult): PortRow {
     source: "http",
     title: r.title ?? null,
     status: r.status,
+    container: null,
+    group: "dev",
+    known: null,
   };
+  if (airplay) {
+    row.process = "ControlCenter";
+    annotate(row);
+  }
+  return row;
 }

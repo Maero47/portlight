@@ -16,14 +16,38 @@ const TYPES: Record<string, string> = {
 };
 
 export type Scenario = "list" | "empty" | "missing" | "forbidden";
+export interface MockTab {
+  url: string;
+  title: string;
+  windowId?: number;
+}
+export interface MockOptions {
+  scenario: Scenario;
+  id: string;
+  settings?: Record<string, unknown>;
+  tabs?: MockTab[];
+  /** Answer reveal/openEditor like a host from before those requests existed. */
+  oldHost?: boolean;
+  /** Pretend a process comes straight back after Quit (launchd / brew services). */
+  respawn?: number[];
+}
 export const PINNED_ID = pinnedExtensionId();
 
 /** Serve the built extension from a fake origin and stub chrome.* with a mocked native host. */
 export async function openPopup(
   page: Page,
-  opts: { scenario?: Scenario; scheme?: "light" | "dark"; httpPorts?: Record<number, string>; id?: string } = {},
+  opts: {
+    scenario?: Scenario;
+    scheme?: "light" | "dark";
+    httpPorts?: Record<number, string>;
+    id?: string;
+    settings?: Record<string, unknown>;
+    tabs?: MockTab[];
+    oldHost?: boolean;
+    respawn?: number[];
+  } = {},
 ) {
-  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID } = opts;
+  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID, settings, tabs, oldHost, respawn } = opts;
   const errors: string[] = [];
   page.on("console", (m) => {
     if (m.type() === "error") errors.push(m.text());
@@ -50,18 +74,20 @@ export async function openPopup(
   });
 
   await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
-  await page.addInitScript(mockChrome, { scenario, id });
+  await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn } satisfies MockOptions);
   await page.goto(`${ORIGIN}/popup.html`);
   return { errors };
 }
 
 /** Runs in the page. Keep it self-contained. */
-function mockChrome({ scenario, id }: { scenario: Scenario; id: string }) {
+function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respawn = [] }: MockOptions) {
   const now = Date.now();
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
-  const L = (port: number, address: string, process: string, pid: number, cwd: string | null, command: string, startedMin: number) => ({
+  const L = (port: number, address: string, process: string, pid: number, cwd: string | null, command: string, startedMin: number, container: any = undefined) => ({
     port, address, family: address.includes(":") ? "IPv6" : "IPv4", pid, process, command, cwd, user: "mali", startedAt: ago(startedMin),
+    ...(container ? { container } : {}),
   });
+  const DOCKER = "/Applications/Docker.app/Contents/MacOS/com.docker.backend";
   let listeners =
     scenario === "list"
       ? [
@@ -69,10 +95,21 @@ function mockChrome({ scenario, id }: { scenario: Scenario; id: string }) {
           L(3000, "::1", "node", 48211, "/Users/mali/code/storefront", "node /Users/mali/code/storefront/node_modules/.bin/next dev", 134),
           L(5173, "::1", "node", 51877, "/Users/mali/code/portlight/extension", "node /Users/mali/code/portlight/extension/node_modules/.bin/vite", 12),
           L(5432, "127.0.0.1", "postgres", 712, "/opt/homebrew/var/postgresql@16", "/opt/homebrew/opt/postgresql@16/bin/postgres -D /opt/homebrew/var/postgresql@16", 4410),
-          L(6006, "0.0.0.0", "node", 50120, "/Users/mali/code/design-system", "node node_modules/.bin/storybook dev -p 6006", 47),
+          L(6006, "0.0.0.0", "node", 50120, "/Users/mali/code/design-system", "node node_modules/.bin/storybook dev -p 6006", 60 * 26),
           L(6379, "127.0.0.1", "redis-server", 709, "/", "/opt/homebrew/opt/redis/bin/redis-server 127.0.0.1:6379", 4410),
           L(8000, "0.0.0.0", "python3.12", 52004, "/Users/mali/code/ledger/api", "/Users/mali/code/ledger/.venv/bin/python -m uvicorn main:app --reload --host 0.0.0.0", 5),
           L(8787, "127.0.0.1", "workerd", 52990, "/Users/mali/code/edge-cache", "/Users/mali/code/edge-cache/node_modules/@cloudflare/workerd/bin/workerd serve", 0.4),
+          // Not yours: macOS services (hidden by default), a desktop app helper, Docker containers.
+          L(5000, "*", "ControlCenter", 611, "/", "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter", 6000),
+          L(7000, "*", "ControlCenter", 611, "/", "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter", 6000),
+          L(49163, "*", "rapportd", 604, "/", "/usr/libexec/rapportd", 6000),
+          L(44950, "127.0.0.1", "figma_agent", 1290, "/", "/Applications/Figma Agent.app/Contents/MacOS/figma_agent", 3000),
+          L(5433, "127.0.0.1", "com.docker.backend", 1402, null, DOCKER, 300, {
+            id: "8f2c1a", name: "shop-db-1", image: "postgres:16-alpine", project: "shop", containerPort: 5432, workingDir: "/Users/mali/code/shop",
+          }),
+          L(6380, "127.0.0.1", "com.docker.backend", 1402, null, DOCKER, 300, {
+            id: "41be07", name: "shop-cache-1", image: "redis:7", project: "shop", containerPort: 6379, workingDir: "/Users/mali/code/shop",
+          }),
         ]
       : [];
   const opened: string[] = [];
@@ -108,9 +145,18 @@ function mockChrome({ scenario, id }: { scenario: Scenario; id: string }) {
         res = { type: "suggest", ports: out };
         break;
       }
-      case "kill":
+      case "kill": {
+        const gone = listeners.filter((l) => l.pid === msg.pid);
         listeners = listeners.filter((l) => l.pid !== msg.pid);
-        res = { type: "kill", pid: msg.pid };
+        // Respawned processes come back under a new PID, like launchd's KeepAlive.
+        for (const l of gone) if (respawn.includes(l.port)) listeners.push({ ...l, pid: l.pid + 1000, startedAt: new Date().toISOString() });
+        res = { type: "kill", pid: msg.pid, killed: [msg.pid] };
+        break;
+      }
+      case "reveal":
+      case "openEditor":
+        if (oldHost) return { id: msg.id, ok: false, error: { code: "bad_request", message: `unknown request type: "${msg.type}"` } };
+        res = { type: msg.type, path: listeners.find((l) => l.pid === msg.pid)?.cwd ?? "/" };
         break;
     }
     return { id: msg.id, ok: true, ...res };
@@ -157,10 +203,53 @@ function mockChrome({ scenario, id }: { scenario: Scenario; id: string }) {
       };
     },
   };
+  // chrome.storage.sync with change events, so the popup's settings round-trip like the real thing.
+  const store: Record<string, any> = settings ? { "portlight.settings": { version: 1, ...settings } } : {};
+  const storageListeners: ((changes: any, area: string) => void)[] = [];
+  (window as any).__store = store;
+  const badges: string[] = [];
+  (window as any).__badges = badges;
+  const focused: any[] = [];
+  (window as any).__focused = focused;
+  (window as any).__optionsOpened = 0;
+  let tabList = tabs.map((t, i) => ({ id: 100 + i, windowId: t.windowId ?? 1, url: t.url, title: t.title, active: false, lastAccessed: now - i * 1000 }));
+  (window as any).__tabs = () => tabList;
+  runtime.openOptionsPage = async () => void ((window as any).__optionsOpened += 1);
+  const noopEvent = { addListener() {}, removeListener() {} };
   const chromeStub = {
     runtime,
-    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
-    tabs: { create: async (o: { url: string }) => void opened.push(o.url) },
+    action: { setBadgeText: async (o: { text: string }) => void badges.push(o.text), setBadgeBackgroundColor: async () => {} },
+    storage: {
+      sync: {
+        get: async (key: string) => (key in store ? { [key]: structuredClone(store[key]) } : {}),
+        set: async (items: Record<string, any>) => {
+          const changes: any = {};
+          for (const [k, v] of Object.entries(items)) {
+            changes[k] = { oldValue: store[k], newValue: structuredClone(v) };
+            store[k] = structuredClone(v);
+          }
+          setTimeout(() => storageListeners.forEach((f) => f(changes, "sync")), 0);
+        },
+      },
+      onChanged: {
+        addListener: (f: any) => storageListeners.push(f),
+        removeListener: (f: any) => storageListeners.splice(storageListeners.indexOf(f), 1),
+      },
+    },
+    tabs: {
+      create: async (o: { url: string }) => void opened.push(o.url),
+      // Real Chrome filters by the URL patterns; the mock keeps only http://localhost and 127.0.0.1.
+      query: async (q: { url?: string[] }) =>
+        tabList.filter((t) => !q.url || /^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(t.url)).map((t) => ({ ...t })),
+      update: async (tabId: number, props: any) => void focused.push({ tabId, ...props }),
+      remove: async (ids: number[]) => {
+        tabList = tabList.filter((t) => !ids.includes(t.id));
+      },
+      onUpdated: noopEvent,
+      onRemoved: noopEvent,
+      onCreated: noopEvent,
+    },
+    windows: { update: async (windowId: number, props: any) => void focused.push({ windowId, ...props }) },
   };
   Object.defineProperty(window, "chrome", { value: chromeStub, configurable: true, writable: true });
 }
