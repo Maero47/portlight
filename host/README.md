@@ -19,7 +19,8 @@ then confirms with a bind/connect probe, so it is right even when the owner is h
 
 ## Install
 
-Find the extension ID on `chrome://extensions` (enable Developer mode), then:
+Most people should run `./install.sh` in the repository root: it builds the extension
+and calls this installer with the extension's pinned ID. To install the host on its own:
 
 ```sh
 cd host
@@ -31,7 +32,8 @@ This copies the host to `~/Library/Application Support/Portlight/host` (macOS) o
 `~/.local/share/portlight/host` (Linux), writes a launcher that pins the current
 `node` binary, and writes `com.portlight.host.json` into the `NativeMessagingHosts`
 folder of each installed browser: Chrome (stable/Beta/Dev/Canary), Chromium, Brave,
-Edge, Arc (macOS) and Vivaldi. It is safe to re-run and prints every file it touches.
+Edge, Arc (macOS) and Vivaldi. It then pings the installed copy to make sure it answers.
+It is safe to re-run from any directory and prints every file it touches.
 
 Re-run it after switching Node versions (e.g. with nvm), since the launcher points
 at a specific `node`.
@@ -41,7 +43,7 @@ Windows: `powershell -ExecutionPolicy Bypass -File install.ps1 <extension-id>`.
 ## Uninstall
 
 ```sh
-./uninstall.sh                  # macOS / Linux
+./uninstall.sh                  # macOS / Linux (or ./install.sh --uninstall in the root)
 powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall   # Windows
 ```
 
