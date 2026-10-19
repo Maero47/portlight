@@ -5,6 +5,7 @@ import { HostClient, HostConnectionError, chromeTransport } from "../lib/host.ts
 import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, saveSettings, type Settings } from "../lib/settings.ts";
 import { icon } from "../popup/icons.ts";
+import { WriteScheduler } from "./writer.ts";
 import {
   EDITORS,
   GROUPS,
@@ -56,16 +57,10 @@ function announce(text: string) {
 
 // ---------- saving ----------
 
-// saveSettings() reads, merges and writes; chaining keeps fast clicks from overwriting each other.
-let queue: Promise<unknown> = Promise.resolve();
+// Every write goes through one scheduler: edits are merged and storage.sync is written at most
+// once per MIN_WRITE_INTERVAL_MS, so no control can go past the sync write quota. The page
+// itself updates instantly; only the storage write is paced.
 let savedTimer: ReturnType<typeof setTimeout> | undefined;
-/** Saves still in flight. Their storage echoes would briefly undo newer optimistic edits. */
-let pending = 0;
-/** Edits waiting to be written; repeating keys pile up here instead of each hitting storage. */
-let staged: Partial<Settings> = {};
-let stageTimer: ReturnType<typeof setTimeout> | undefined;
-/** chrome.storage.sync allows 120 writes a minute; a held arrow key repeats ~30 times a second. */
-const SETTLE_MS = 400;
 /** Bumped on every local edit, so a storage read that started earlier can tell it is stale. */
 let edits = 0;
 /**
@@ -76,49 +71,30 @@ let ownWrites: { snap: string; at: number }[] = [];
 const ECHO_MS = 2000;
 const snapshot = (s: Settings) => JSON.stringify(s);
 
-/**
- * Apply an edit now and save it. With `settle`, the write waits until the value has been
- * still for SETTLE_MS, so holding a key produces one write instead of dozens.
- */
-function commit(patch: Partial<Settings>, settle = false) {
+const writer = new WriteScheduler<Partial<Settings>>(
+  async (patch) => {
+    try {
+      // saveSettings() reads, merges and writes, so changes made in the popup meanwhile survive.
+      const saved = await saveSettings(patch);
+      const now = Date.now();
+      ownWrites = [...ownWrites.filter((w) => now - w.at < ECHO_MS), { snap: snapshot(saved), at: now }];
+      showSaved();
+    } catch (e) {
+      console.warn("Portlight: could not save settings", e);
+      announce("Couldn’t save. Try again.");
+    }
+  },
+  // Once the last save lands, take storage as the truth (it may hold edits from the popup).
+  { onIdle: () => resync() },
+);
+
+/** Apply an edit to the page now and hand it to the write scheduler. */
+function commit(patch: Partial<Settings>) {
   settings = { ...settings, ...patch };
   edits++;
   render();
-  staged = { ...staged, ...patch };
-  clearTimeout(stageTimer);
-  stageTimer = undefined;
-  if (settle) {
-    stageTimer = setTimeout(flush, SETTLE_MS);
-    return queue;
-  }
-  return flush();
-}
-
-function flush() {
-  clearTimeout(stageTimer);
-  stageTimer = undefined;
-  const patch = staged;
-  staged = {};
-  if (!Object.keys(patch).length) return queue;
-  pending++;
-  queue = queue
-    .then(() => saveSettings(patch))
-    .then(
-      (saved) => {
-        const now = Date.now();
-        ownWrites = [...ownWrites.filter((w) => now - w.at < ECHO_MS), { snap: snapshot(saved), at: now }];
-        showSaved();
-      },
-      (e) => {
-        console.warn("Portlight: could not save settings", e);
-        announce("Couldn’t save. Try again.");
-      },
-    )
-    .finally(() => {
-      // Once the last save lands, take storage as the truth (it may hold edits from the popup).
-      if (--pending === 0) resync();
-    });
-  return queue;
+  writer.schedule(patch);
+  return writer.settled();
 }
 
 function resync() {
@@ -134,11 +110,11 @@ function adopt(s: Settings, at = edits) {
 }
 
 /** Nothing staged and nothing in flight: storage can be taken as the truth. */
-const idle = () => pending === 0 && stageTimer === undefined;
+const idle = () => !writer.busy();
 
-// Don't lose a settling edit when the tab closes or hides.
-addEventListener("pagehide", () => void flush());
-document.addEventListener("visibilitychange", () => document.hidden && void flush());
+// Don't lose a staged edit when the tab closes or hides.
+addEventListener("pagehide", () => void writer.flush());
+document.addEventListener("visibilitychange", () => document.hidden && void writer.flush());
 
 function showSaved() {
   const el = $("saved");
@@ -216,7 +192,7 @@ function renderSwitches() {
 const spin = document.querySelector<HTMLElement>(".stepper-arrows")!;
 function stepBy(delta: number) {
   const next = stepIdle(settings.idleAfterHours, delta);
-  if (next !== settings.idleAfterHours) void commit({ idleAfterHours: next }, true);
+  if (next !== settings.idleAfterHours) void commit({ idleAfterHours: next });
 }
 spin.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>("[data-step]");
@@ -300,7 +276,7 @@ preferred.addEventListener("keydown", (e) => {
     clearTimeout(preferredTimer);
     preferred.value = String(n);
     setFieldError(preferred, preferredError, null);
-    if (n !== settings.preferredPort) void commit({ preferredPort: n }, true);
+    if (n !== settings.preferredPort) void commit({ preferredPort: n });
   }
 });
 

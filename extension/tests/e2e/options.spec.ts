@@ -38,6 +38,7 @@ function mockChrome({ host, stored, id, key }: { host: Host; stored: unknown; id
   const w = window as any;
   w.__store = area;
   w.__writes = 0;
+  w.__writeTimes = [];
   const failure =
     host === "missing"
       ? "Specified native messaging host not found."
@@ -72,6 +73,7 @@ function mockChrome({ host, stored, id, key }: { host: Host; stored: unknown; id
         area[k] = clone(v);
       }
       w.__writes++;
+      w.__writeTimes.push(performance.now());
       setTimeout(() => listeners.forEach((f) => f(changes, "sync")), 0);
     },
   };
@@ -269,32 +271,75 @@ test("keyboard can remove any port, not just the last", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Remove 9229" })).toBeFocused();
 });
 
-test("holding an arrow key saves once, not on every repeat", async ({ page }) => {
+/** Storage write times in the page, to check the pace of writes. */
+const writeTimes = (page: Page) => page.evaluate(() => (window as any).__writeTimes as number[]);
+function expectPaced(times: number[]) {
+  // The scheduler starts a write at most every 600 ms; storage.set lands a read later, so allow
+  // some jitter. Anything ≥ 500 ms apart is at most 120 a minute, the chrome.storage.sync cap.
+  for (let i = 1; i < times.length; i++) expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(500);
+}
+
+test("200 rapid edits across mixed controls stay well under the sync write quota", async ({ page }) => {
+  const seeded = Array.from({ length: 40 }, (_, i) => 5000 + i);
+  await openOptions(page, { stored: { ...DEFAULT_SETTINGS, hiddenPorts: seeded } });
+  const t0 = await page.evaluate(() => performance.now());
+
+  // Radio groups wrap, so arrow keys can change them forever: 40 + 40 changes.
+  await page.locator('input[name="theme"][value="system"]').focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowRight");
+  await page.locator('input[name="motion"][value="system"]').focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowRight");
+  // Stepper and port field: 40 + 40.
+  await page.getByRole("spinbutton", { name: "Mark as idle after" }).focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowUp");
+  await page.getByLabel("Suggest from").focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowUp");
+  // Backspace in the empty token input removes one port per press: 40.
+  await page.locator("#hidden-ports-input").focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("Backspace");
+
+  // The page is instant even though storage is paced.
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light"); // 40 steps over 3 options
+  await expect(page.locator('[aria-label="Hidden ports"] .token')).toHaveCount(0);
+  const expected: Partial<Settings> = { theme: "light", motion: "full", idleAfterHours: 48, preferredPort: 3040, hiddenPorts: [] };
+  await expectStored(page, expected);
+  await expect(page.getByLabel("Suggest from")).toHaveValue("3040");
+
+  const times = await writeTimes(page);
+  const elapsed = times.at(-1)! - t0;
+  expectPaced(times);
+  // 200 edits became a handful of writes; even sustained this pace is ≤ 100 a minute.
+  expect(times.length).toBeLessThanOrEqual(Math.floor(elapsed / 600) + 2);
+  expect((times.length / Math.max(elapsed, 60_000)) * 60_000).toBeLessThan(120);
+  console.log(`200 edits → ${times.length} writes over ${Math.round(elapsed)} ms`);
+});
+
+test("holding a key writes at a steady pace with the final value", async ({ page }) => {
   await openOptions(page);
-  const writes = () => page.evaluate(() => (window as any).__writes as number);
   const pref = page.getByLabel("Suggest from");
   await pref.focus();
   for (let i = 0; i < 60; i++) await page.keyboard.press("ArrowUp");
   await expect(pref).toHaveValue("3060");
   await expectStored(page, { preferredPort: 3060 });
-  expect(await writes()).toBeLessThanOrEqual(2);
-
-  const before = await writes();
-  const spin = page.getByRole("spinbutton", { name: "Mark as idle after" });
-  await spin.focus();
-  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowUp");
-  await expect(page.locator("#idle-value")).toHaveText("48 hours");
-  await expectStored(page, { idleAfterHours: 48 });
-  expect((await writes()) - before).toBeLessThanOrEqual(2);
+  expectPaced(await writeTimes(page));
 });
 
-test("a settling edit is written when the page hides", async ({ page }) => {
+test("a single change is written at once", async ({ page }) => {
+  await openOptions(page);
+  await page.getByRole("switch", { name: /Group by category/ }).click();
+  // Well under the 600 ms interval: the first edit after a quiet spell isn't delayed.
+  await expect.poll(async () => (await stored(page))?.groupRows, { timeout: 250 }).toBe(false);
+});
+
+test("a waiting edit is written when the page hides", async ({ page }) => {
   await openOptions(page);
   await page.getByRole("spinbutton", { name: "Mark as idle after" }).focus();
-  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown"); // written at once: 7
+  await expectStored(page, { idleAfterHours: 7 });
+  await page.keyboard.press("ArrowDown"); // waits for the interval: 6
   await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide")));
-  // Well under the 400 ms settle delay, so only the pagehide flush can have written it.
-  await expect.poll(async () => (await stored(page))?.idleAfterHours, { timeout: 250 }).toBe(7);
+  // Under the 600 ms interval, so only the pagehide flush can have written it.
+  await expect.poll(async () => (await stored(page))?.idleAfterHours, { timeout: 250 }).toBe(6);
 });
 
 test("the popup can later set a value this page wrote before", async ({ page }) => {
