@@ -248,3 +248,97 @@ test("Windows tree kill never signals a stale-parent orphan", async () => {
   assert.deepEqual(r.killed, [3000, 3010]);
   assert.ok(!calls.signal.some(([p]) => p === 2100));
 });
+
+// ---------- netinfo, settings shortcuts, share-link tunnels ----------
+
+test("netinfo returns the hostname and LAN addresses", async () => {
+  const addresses = [{ name: "en0", address: "192.168.1.23", family: "IPv4", virtual: false }];
+  const { handle } = setup([], { deps: { netinfo: async () => ({ hostname: "studio.local", addresses }) } });
+  assert.deepEqual(await handle({ id: "n", type: "netinfo" }), { id: "n", ok: true, type: "netinfo", hostname: "studio.local", addresses });
+});
+
+test("openSettings launches a whitelisted pane on macOS only", async () => {
+  const mac = setup([], { deps: { platform: "darwin", settingsCommand: (pane) => ({ file: "/usr/bin/open", args: [`x-apple.systempreferences:${pane}`] }) } });
+  assert.deepEqual(await mac.handle({ id: "s", type: "openSettings", pane: "airdrop-handoff" }), { id: "s", ok: true, type: "openSettings", pane: "airdrop-handoff" });
+  assert.deepEqual(mac.calls.launch, [["/usr/bin/open", "x-apple.systempreferences:airdrop-handoff"]]);
+  for (const pane of ["x-apple.systempreferences:com.apple.Users", "__proto__", 3, undefined]) {
+    const r = await mac.handle({ id: "b", type: "openSettings", pane });
+    assert.equal(r.error?.code, "bad_request", String(pane));
+  }
+  const linux = setup([], { deps: { platform: "linux", settingsCommand: () => null } });
+  assert.equal((await linux.handle({ id: "l", type: "openSettings", pane: "sharing" })).error.code, "not_found");
+  assert.deepEqual(linux.calls.launch, []);
+});
+
+/** A tunnel manager double that records what the handler asked for. */
+function fakeTunnels() {
+  const started = [];
+  const stopped = [];
+  return {
+    started,
+    stopped,
+    providers: () => ({ cloudflared: true, ngrok: false }),
+    list: () => started.map(([port]) => ({ port, provider: "cloudflared", url: `https://p${port}.trycloudflare.com`, startedAt: "t" })),
+    start: async (port, host, provider) => {
+      started.push([port, host, provider]);
+      if (port === 4444) throw { code: "internal", message: "429 Too Many Requests" };
+      return { port, provider: "cloudflared", url: `https://p${port}.trycloudflare.com`, startedAt: "t" };
+    },
+    stop: (port) => (stopped.push(port), true),
+    stopAll: () => stopped.push("all"),
+  };
+}
+
+test("tunnelStart shares your own listening port through the forwarded loopback address", async () => {
+  const tunnels = fakeTunnels();
+  const { handle } = setup(
+    [
+      L({ port: 5173, pid: 10, address: "::1", family: "IPv6" }),
+      L({ port: 3000, pid: 11, address: "*" }),
+      L({ port: 3000, pid: 11, address: "::", family: "IPv6" }),
+      L({ port: 4444, pid: 12 }),
+    ],
+    { deps: { tunnels } },
+  );
+  const r = await handle({ id: "t", type: "tunnelStart", port: 5173 });
+  assert.deepEqual(r, { id: "t", ok: true, type: "tunnelStart", tunnel: { port: 5173, provider: "cloudflared", url: "https://p5173.trycloudflare.com", startedAt: "t" } });
+  await handle({ id: "t2", type: "tunnelStart", port: 3000, provider: "ngrok" });
+  assert.deepEqual(tunnels.started, [[5173, "::1", undefined], [3000, "127.0.0.1", "ngrok"]]);
+  assert.deepEqual(await handle({ id: "e", type: "tunnelStart", port: 4444 }), {
+    id: "e", ok: false, error: { code: "internal", message: "429 Too Many Requests" },
+  });
+  const st = await handle({ id: "s", type: "tunnelStatus" });
+  assert.deepEqual(st.providers, { cloudflared: true, ngrok: false });
+  assert.equal(st.tunnels.length, 3);
+  assert.deepEqual(await handle({ id: "x", type: "tunnelStop", port: 5173 }), { id: "x", ok: true, type: "tunnelStop", port: 5173, stopped: true });
+  handle.close();
+  assert.deepEqual(tunnels.stopped, [5173, "all"]);
+});
+
+test("tunnelStart refuses bad input, silent ports and other users' servers", async () => {
+  const tunnels = fakeTunnels();
+  const { handle } = setup(
+    [
+      L({ port: 6000, pid: 20, user: "root" }),
+      L({ port: 6001, pid: null, process: null, user: null }),
+      L({ port: 5433, pid: null, process: null, user: null, container: { id: "a", name: "db", image: "postgres" } }),
+    ],
+    { busyPorts: [7000], deps: { tunnels } },
+  );
+  const code = async (body) => (await handle({ id: "q", type: "tunnelStart", ...body })).error?.code ?? "ok";
+  assert.equal(await code({ port: 0 }), "bad_request");
+  assert.equal(await code({ port: "3000" }), "bad_request");
+  assert.equal(await code({ port: 3000, provider: "/bin/sh" }), "bad_request");
+  assert.equal(await code({ port: 3000 }), "not_found", "nothing listening");
+  assert.equal(await code({ port: 7000 }), "not_permitted", "listening but owner invisible");
+  assert.equal(await code({ port: 6000 }), "not_permitted", "root's server");
+  assert.equal(await code({ port: 6001 }), "not_permitted", "no owner");
+  assert.equal(await code({ port: 5433 }), "ok", "a port your container engine publishes");
+  assert.deepEqual(tunnels.started.map(([p]) => p), [5433]);
+});
+
+test("tunnelStop before any tunnel exists is a no-op", async () => {
+  const { handle } = setup([]);
+  assert.deepEqual(await handle({ id: "x", type: "tunnelStop", port: 3000 }), { id: "x", ok: true, type: "tunnelStop", port: 3000, stopped: false });
+  assert.equal((await handle({ id: "y", type: "tunnelStop", port: -1 })).error.code, "bad_request");
+});

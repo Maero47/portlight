@@ -1,4 +1,4 @@
-import { HOST_NAME, type Request, type Response } from "../../../shared/protocol.ts";
+import { HOST_NAME, type Request, type Response, type SettingsPane, type TunnelProvider } from "../../../shared/protocol.ts";
 
 type DistributiveOmit<T, K extends keyof any> = T extends unknown ? Omit<T, K> : never;
 export type RequestBody = DistributiveOmit<Request, "id">;
@@ -121,14 +121,14 @@ export const chromeTransport: Transport = (msg) =>
 export class HostClient {
   constructor(private readonly transport: Transport = chromeTransport, private readonly timeoutMs = 8000) {}
 
-  async request<T extends OkType>(body: RequestBody): Promise<Ok<T>> {
+  async request<T extends OkType>(body: RequestBody, timeoutMs = this.timeoutMs): Promise<Ok<T>> {
     const msg = { ...body, id: nextId() } as Request;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         reject(new HostConnectionError("timeout", "The host did not answer in time."));
         this.transport.reset?.();
-      }, this.timeoutMs);
+      }, timeoutMs);
     });
     try {
       const res = await Promise.race([this.transport(msg), timeout]);
@@ -160,5 +160,21 @@ export class HostClient {
   }
   openEditor(pid: number, editor: string) {
     return this.request<"openEditor">({ type: "openEditor", pid, editor });
+  }
+  netinfo() {
+    return this.request<"netinfo">({ type: "netinfo" });
+  }
+  openSettings(pane: SettingsPane) {
+    return this.request<"openSettings">({ type: "openSettings", pane });
+  }
+  tunnelStatus() {
+    return this.request<"tunnelStatus">({ type: "tunnelStatus" });
+  }
+  /** The host waits up to 25 s for the tunnel's URL, so this one gets a longer timeout. */
+  tunnelStart(port: number, provider?: TunnelProvider) {
+    return this.request<"tunnelStart">({ type: "tunnelStart", port, provider }, 35_000);
+  }
+  tunnelStop(port: number) {
+    return this.request<"tunnelStop">({ type: "tunnelStop", port });
   }
 }

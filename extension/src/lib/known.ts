@@ -1,4 +1,5 @@
 import type { Classifiable } from "./classify.ts";
+import type { SettingsPane } from "../../../shared/protocol.ts";
 
 /**
  * A small curated knowledge base for listeners people keep asking about
@@ -17,6 +18,8 @@ export interface Known {
   command?: string;
   /** Quitting would not help (the OS restarts it) or would do harm (all of Docker). */
   noQuit?: boolean;
+  /** macOS System Settings pane where it is switched off; the popup offers a button. */
+  pane?: SettingsPane;
 }
 
 interface Entry {
@@ -41,6 +44,7 @@ const ENTRIES: Entry[] = [
       about: `macOS listens here so other devices can AirPlay to this Mac. ${RESTARTS}`,
       fix: "Turn it off in System Settings › General › AirDrop & Handoff › AirPlay Receiver, or use another port.",
       noQuit: true,
+      pane: "airdrop-handoff",
     }),
   },
   {
@@ -55,6 +59,7 @@ const ENTRIES: Entry[] = [
       about: `rapportd lets your Apple devices find each other for Handoff and Universal Clipboard. ${RESTARTS}`,
       fix: "Turning off Handoff in System Settings › General › AirDrop & Handoff quiets it.",
       noQuit: true,
+      pane: "airdrop-handoff",
     }),
   },
   {
@@ -69,6 +74,7 @@ const ENTRIES: Entry[] = [
       about: `macOS holds this port for a service and starts the service on the first connection. ${RESTARTS}`,
       fix: r.port === 22 ? "Turn it off in System Settings › General › Sharing › Remote Login." : undefined,
       noQuit: true,
+      pane: r.port === 22 ? "sharing" : undefined,
     }),
   },
   {
@@ -79,6 +85,7 @@ const ENTRIES: Entry[] = [
       about: "Lets other computers sign in to this one over SSH. The system restarts it on demand.",
       fix: "On a Mac: System Settings › General › Sharing › Remote Login.",
       noQuit: true,
+      pane: "sharing",
     }),
   },
   {
@@ -89,6 +96,7 @@ const ENTRIES: Entry[] = [
       about: `Lets others view this screen. ${RESTARTS}`,
       fix: "Turn it off in System Settings › General › Sharing › Screen Sharing.",
       noQuit: true,
+      pane: "sharing",
     }),
   },
   {

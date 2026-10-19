@@ -6,6 +6,8 @@ import { scanListeners, windowsProcessUser, processUid, ancestorPids, processPai
 import { createContainerSource, attachContainers, isContainerEngine } from "./containers.js";
 import { EDITORS, EDITOR_IDS, editorCommand, revealCommand, launchDetached } from "./launch.js";
 import { probePort, suggestPorts, isValidPort } from "./ports.js";
+import { createTunnelManager, PROVIDER_IDS } from "./tunnel.js";
+import { lanAddresses, settingsCommand, SETTINGS_PANES } from "./system.js";
 import { PROTOCOL_VERSION, HOST_VERSION } from "./protocol.js";
 
 const MAX_CHECK_PORTS = 1000;
@@ -68,6 +70,9 @@ export function defaultDeps() {
     editorCommand: (id, dir) => editorCommand(id, dir),
     probe: (port) => probePort(port),
     signal: (pid, sig) => process.kill(pid, sig),
+    netinfo: () => ({ hostname: os.hostname(), addresses: lanAddresses() }),
+    settingsCommand: (pane, platform) => settingsCommand(pane, platform),
+    tunnels: null, // created on first use, so tests and plain `list` calls never touch it
     user: me.name,
     // Does this pid run as the current user? Unix compares numeric uids, since `ps`
     // may print a uid or a truncated name for long usernames. Windows asks tasklist /V.
@@ -88,6 +93,22 @@ export function defaultDeps() {
   };
 }
 
+/**
+ * The address a tunnel should forward to: the loopback of the family the server listens on,
+ * or the specific address it is bound to. IPv4 first (cloudflared and ngrok resolve
+ * "localhost" differently, so never hand them a name).
+ */
+export function tunnelTarget(listeners) {
+  const picks = listeners.map((l) => {
+    const a = String(l.address ?? "").replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+    if (a === "*" || a === "0.0.0.0" || a === "") return "127.0.0.1";
+    if (a === "::" || a === "::0") return "::1";
+    if (a.startsWith("::ffff:")) return a.slice(7);
+    return a;
+  });
+  return picks.find((a) => !a.includes(":")) ?? picks[0] ?? "127.0.0.1";
+}
+
 /** Pick the most informative listener when several share a port (prefer ones with a pid). */
 function bestListener(list) {
   return list.find((l) => l.pid != null) ?? list[0];
@@ -95,6 +116,7 @@ function bestListener(list) {
 
 export function createHandler(overrides = {}) {
   const deps = { ...defaultDeps(), ...overrides };
+  const tunnels = () => (deps.tunnels ??= createTunnelManager({ probe: (port) => deps.probe(port) }));
 
   // OS scan and container lookup run side by side; a broken engine CLI never fails a scan.
   async function scanWithContainers() {
@@ -232,6 +254,69 @@ export function createHandler(overrides = {}) {
     },
   };
 
+  Object.assign(handlers, {
+    async netinfo(req) {
+      const { hostname, addresses } = await deps.netinfo();
+      return { id: req.id, ok: true, type: "netinfo", hostname, addresses };
+    },
+
+    async openSettings(req) {
+      const { pane } = req;
+      if (typeof pane !== "string" || !Object.hasOwn(SETTINGS_PANES, pane)) {
+        fail("bad_request", `\`pane\` must be one of: ${Object.keys(SETTINGS_PANES).join(", ")}`);
+      }
+      const cmd = deps.settingsCommand(pane, deps.platform);
+      if (!cmd) fail("not_found", "System Settings shortcuts are only available on macOS");
+      await launch(cmd.file, cmd.args, "System Settings");
+      return { id: req.id, ok: true, type: "openSettings", pane };
+    },
+
+    async tunnelStatus(req) {
+      const t = tunnels();
+      return { id: req.id, ok: true, type: "tunnelStatus", providers: t.providers(), tunnels: t.list() };
+    },
+
+    async tunnelStart(req) {
+      const { port, provider } = req;
+      if (!isValidPort(port)) fail("bad_request", "`port` must be an integer port 1-65535");
+      if (provider !== undefined && !PROVIDER_IDS.includes(provider)) fail("bad_request", `\`provider\` must be one of: ${PROVIDER_IDS.join(", ")}`);
+      const host = await shareableTarget(port);
+      try {
+        const tunnel = await tunnels().start(port, host, provider);
+        return { id: req.id, ok: true, type: "tunnelStart", tunnel };
+      } catch (err) {
+        if (err instanceof ProtocolError || !err?.code) throw err;
+        fail(err.code, err.message);
+      }
+    },
+
+    async tunnelStop(req) {
+      const { port } = req;
+      if (!isValidPort(port)) fail("bad_request", "`port` must be an integer port 1-65535");
+      const stopped = deps.tunnels ? deps.tunnels.stop(port) : false;
+      return { id: req.id, ok: true, type: "tunnelStop", port, stopped };
+    },
+  });
+
+  /**
+   * Only your own servers (or ports your container engine publishes) can be shared, and only
+   * while they listen. Returns the address the tunnel forwards to.
+   */
+  async function shareableTarget(port) {
+    const on = (await freshScan()).filter((l) => l.port === port);
+    if (on.length === 0) {
+      if ((await deps.probe(port)) !== "busy") fail("not_found", `nothing is listening on port ${port}`);
+      fail("not_permitted", `port ${port} belongs to another user`);
+    }
+    let allowed = on.some((l) => l.container);
+    for (const l of on) {
+      if (allowed) break;
+      if (l.pid != null && (await deps.isMine(l)).mine) allowed = true;
+    }
+    if (!allowed) fail("not_permitted", `port ${port} belongs to another user`);
+    return tunnelTarget(on);
+  }
+
   async function protectedSet() {
     return typeof deps.protectedPids === "function" ? await deps.protectedPids() : deps.protectedPids;
   }
@@ -268,7 +353,7 @@ export function createHandler(overrides = {}) {
   }
 
   /** Never throws: always resolves to a protocol Response. */
-  return async function handle(req) {
+  async function handle(req) {
     const id = req && typeof req === "object" && typeof req.id === "string" ? req.id : "";
     try {
       if (!req || typeof req !== "object" || Array.isArray(req)) fail("bad_request", "request must be a JSON object");
@@ -280,5 +365,8 @@ export function createHandler(overrides = {}) {
       if (err instanceof ProtocolError) return { id, ok: false, error: { code: err.code, message: err.message } };
       return { id, ok: false, error: { code: "internal", message: String(err?.message ?? err) } };
     }
-  };
+  }
+  /** Stop everything the host started that outlives a request (share-link tunnels). */
+  handle.close = () => deps.tunnels?.stopAll();
+  return handle;
 }

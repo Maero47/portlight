@@ -32,15 +32,27 @@ import {
 } from "../lib/settings.ts";
 import { badgeCount, bestTab, hiddenReason, isIdle, type HiddenReason, type TabRef } from "../lib/view.ts";
 import { closeTabs, focusTab, localTabs, watchTabs } from "../lib/tabs.ts";
-import type { Listener } from "../../../shared/protocol.ts";
+import { fetchPageMeta, loadMetaCache, meaningfulTitle, metaKey, saveMetaCache, type PageMeta } from "../lib/meta.ts";
+import { exposeHint, phoneUrl } from "../lib/phone.ts";
+import { qrSvg } from "../lib/qr.ts";
+import { tunnelRequest, type TunnelReply } from "../lib/tunnels.ts";
+import type { LanAddress, Listener, SettingsPane, Tunnel, TunnelProvider } from "../../../shared/protocol.ts";
 
 type Mode = "loading" | "host" | "missing" | "fallback" | "error";
 type CheckState = "free" | "used" | "pending" | "unknown";
 
 interface Confirm {
   key: string;
-  /** ask/pending/stuck: the Quit flow. info: what this is and why Quit is replaced. notice: a short message. */
-  phase: "ask" | "pending" | "stuck" | "error" | "info" | "notice";
+  /** ask/pending/stuck: the Quit flow. info: what this is and why Quit is replaced. notice: a short message.
+   *  phone: QR code for opening the port on a phone. share: the public-link panel. */
+  phase: "ask" | "pending" | "stuck" | "error" | "info" | "notice" | "phone" | "share";
+  message?: string;
+}
+
+/** "Quit N idle servers…" in the footer. */
+interface Sweep {
+  phase: "ask" | "pending" | "error";
+  keys: string[];
   message?: string;
 }
 
@@ -83,6 +95,18 @@ const state = {
   /** "N hidden" was clicked: show hidden rows until the popup closes. */
   revealHidden: false,
   menu: null as { key: string; scrollTop: number } | null,
+  /** Favicons and page titles by port:pid (lib/meta.ts). */
+  meta: loadMetaCache(),
+  /** LAN addresses for "Open on Phone"; loaded when that panel opens. */
+  net: null as { hostname: string; addresses: LanAddress[] } | "loading" | "unsupported" | "error" | null,
+  /** Share links, as the background worker reports them. */
+  tunnels: [] as Tunnel[],
+  /** Installed tunnel tools; null until the share panel asks. */
+  providers: null as Record<TunnelProvider, boolean> | null,
+  /** Ports whose share link is being created / the last error per port. */
+  sharing: new Set<number>(),
+  shareError: new Map<number, string>(),
+  sweep: null as Sweep | null,
 };
 
 // ---------- DOM helpers ----------
@@ -309,6 +333,7 @@ function refresh(): Promise<void> {
       state.rows = shapeListeners(res.listeners);
       state.stale = false;
       state.mode = "host";
+      followRestart();
       state.failure = null;
       saveCache(res.listeners);
       pushBadge();
@@ -332,8 +357,22 @@ function refresh(): Promise<void> {
     render({ animate: true });
     void updateCheck();
     void updateSuggestion();
+    scheduleMeta();
+    void refreshTunnels();
   })();
   return inflight;
+}
+
+/**
+ * A server restarted with --host comes back under a new pid (a new row key). Keep the
+ * phone/share panel open on it, so the QR code appears the moment it is reachable.
+ */
+function followRestart() {
+  const c = state.confirm;
+  if (!c || (c.phase !== "phone" && c.phase !== "share") || state.rows.some((r) => r.key === c.key)) return;
+  const port = Number(c.key.split(":")[0]);
+  const next = state.rows.find((r) => r.port === port && r.source === "host");
+  state.confirm = next ? { ...c, key: next.key } : null;
 }
 
 let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -368,6 +407,7 @@ async function scanFallback(first = false) {
   state.rows = found.filter((r) => seen.has(r.port)).sort((a, b) => a.port - b.port);
   state.scanning = false;
   render({ animate: true });
+  scheduleMeta();
   void updateSuggestion();
   fallbackTimer = setTimeout(() => void scanFallback(), FALLBACK_RESCAN_MS);
 }
@@ -550,6 +590,233 @@ async function hostAction(key: string, what: "reveal" | "editor") {
   }
 }
 
+// ---------- favicons & titles ----------
+
+const metaInflight = new Set<string>();
+const metaQueue: { key: string; port: number }[] = [];
+let metaActive = 0;
+let metaSaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Rows worth asking for an icon and title: web servers you run, not databases or the OS. */
+function wantsMeta(r: PortRow): boolean {
+  return (r.source === "host" || r.source === "http") && r.group === "dev" && !r.container && !r.known;
+}
+
+function metaFor(r: PortRow): PageMeta | undefined {
+  return state.meta.get(metaKey(r.port, r.pid));
+}
+
+/** Fetch what's missing, three at a time, after the list has painted. */
+function scheduleMeta() {
+  for (const r of state.rows) {
+    if (!wantsMeta(r)) continue;
+    const key = metaKey(r.port, r.pid);
+    if (state.meta.has(key) || metaInflight.has(key)) continue;
+    metaInflight.add(key);
+    metaQueue.push({ key, port: r.port });
+  }
+  while (metaActive < 3 && metaQueue.length) {
+    const job = metaQueue.shift()!;
+    metaActive++;
+    void fetchPageMeta(job.port)
+      .then((m) => {
+        state.meta.set(job.key, m);
+        if (m.icon || m.title) render();
+        clearTimeout(metaSaveTimer);
+        metaSaveTimer = setTimeout(() => saveMetaCache(state.meta), 400);
+      })
+      .finally(() => {
+        metaActive--;
+        scheduleMeta();
+      });
+  }
+}
+
+/** The page title, when it says more than the name the row already shows. */
+function pageTitle(r: PortRow, name: string): string | null {
+  if (r.source === "tab") return null;
+  return meaningfulTitle(metaFor(r)?.title ?? r.title, name, r.project, r.tool, r.known?.tool);
+}
+
+// ---------- phone & share ----------
+
+const DB_IMAGE = /(^|\/)(postgres|postgis|mysql|mariadb|redis|valkey|mongo|memcached|elasticsearch|opensearch|rabbitmq|kafka|zookeeper|clickhouse|cassandra|neo4j|nats)\b/i;
+
+/** Rows that can be opened from a phone or shared: web-ish things you run, not databases or the OS. */
+function canShare(r: PortRow): boolean {
+  if (state.mode !== "host" || r.source !== "host") return false;
+  if (r.container) return !DB_IMAGE.test(r.container.image);
+  return (r.group === "dev" || r.group === "app") && !r.known?.noQuit;
+}
+
+async function loadNet() {
+  state.net = "loading";
+  render();
+  try {
+    const res = await host.netinfo();
+    state.net = { hostname: res.hostname, addresses: res.addresses };
+  } catch (e) {
+    state.net = isUnsupported(e) ? "unsupported" : "error";
+  }
+  render();
+}
+
+function openPhone(key: string) {
+  state.confirm = { key, phase: "phone" };
+  render();
+  void loadNet();
+}
+
+function applyTunnelReply(r: TunnelReply, port?: number) {
+  if (r.ok) {
+    state.tunnels = r.tunnels;
+    if (r.providers) state.providers = r.providers;
+    if (port != null) state.shareError.delete(port);
+  } else if (port != null) {
+    state.shareError.set(
+      port,
+      r.code === "unsupported" ? `Sharing needs a newer helper. Run ${installText()} again to update it.` : r.message,
+    );
+  }
+}
+
+let tunnelSeq = 0;
+/** Cheap: the worker answers from memory and never starts a helper for this. */
+async function refreshTunnels() {
+  if (state.mode !== "host") return;
+  const seq = ++tunnelSeq;
+  const r = await tunnelRequest({ op: "status" });
+  if (seq !== tunnelSeq || !r.ok) return;
+  const before = state.tunnels.map((t) => t.url).join();
+  applyTunnelReply(r);
+  if (before !== state.tunnels.map((t) => t.url).join()) render();
+}
+
+function tunnelFor(port: number): Tunnel | undefined {
+  return state.tunnels.find((t) => t.port === port);
+}
+
+async function openShare(key: string) {
+  const r = rowByKey(key);
+  if (!r) return;
+  state.shareError.delete(r.port);
+  state.confirm = { key, phase: "share" };
+  render();
+  applyTunnelReply(await tunnelRequest({ op: "providers" }), r.port);
+  render();
+}
+
+async function startShare(key: string) {
+  const r = rowByKey(key);
+  if (!r || state.sharing.has(r.port)) return;
+  state.sharing.add(r.port);
+  state.shareError.delete(r.port);
+  render();
+  const reply = await tunnelRequest({ op: "start", port: r.port });
+  // Cancelled while it was starting: the failure is expected, not news.
+  const cancelled = !state.sharing.has(r.port);
+  state.sharing.delete(r.port);
+  if (cancelled) return;
+  applyTunnelReply(reply, r.port);
+  const t = tunnelFor(r.port);
+  if (t) announce(`Public link ready: ${t.url}`);
+  render();
+}
+
+async function stopShare(port: number) {
+  const wasRunning = !!tunnelFor(port);
+  state.sharing.delete(port);
+  applyTunnelReply(await tunnelRequest({ op: "stop", port }), port);
+  announce(wasRunning ? `Stopped sharing port ${port}` : "Cancelled");
+  if (state.confirm?.phase === "share" && !state.shareError.has(port)) cancelConfirm();
+  else render();
+}
+
+async function openPane(pane: SettingsPane, key?: string) {
+  try {
+    await host.openSettings(pane);
+  } catch (e) {
+    const message = isUnsupported(e)
+      ? `This shortcut needs a newer helper. Run ${installText()} again to update it.`
+      : hostErrorMessage(e, "Couldn’t open System Settings.");
+    if (key) {
+      state.confirm = { key, phase: "notice", message };
+      render();
+    } else announce(message);
+  }
+}
+
+// ---------- idle cleanup ----------
+
+/** Idle dev servers you could quit in one go: visible, yours, not containers or OS services. */
+function idleRows(): PortRow[] {
+  if (state.mode !== "host") return [];
+  const seen = new Set<number>();
+  return state.rows.filter((r) => {
+    const ok =
+      !!r.pid &&
+      r.source === "host" &&
+      !r.container &&
+      !r.known?.noQuit &&
+      !hiddenReason(r, state.settings) &&
+      !tunnelFor(r.port) &&
+      isIdle(r, tabsFor(r.port).length, state.settings.idleAfterHours);
+    // One entry per process (a server on two ports is quit once).
+    if (!ok || seen.has(r.pid!)) return false;
+    seen.add(r.pid!);
+    return true;
+  });
+}
+
+function openSweep() {
+  const rows = idleRows();
+  if (!rows.length) return;
+  closeMenu(false);
+  state.confirm = null;
+  state.sweep = { phase: "ask", keys: rows.map((r) => r.key) };
+  render();
+}
+
+function closeSweep() {
+  state.sweep = null;
+  render();
+  $("idle").focus({ preventScroll: true });
+}
+
+async function runSweep() {
+  const sw = state.sweep;
+  if (!sw || sw.phase === "pending") return;
+  const rows = sw.keys.map((k) => rowByKey(k)).filter((r): r is PortRow => !!r?.pid);
+  state.sweep = { ...sw, phase: "pending" };
+  render();
+  const failed: string[] = [];
+  await Promise.all(
+    rows.map(async (r) => {
+      try {
+        await host.kill(r.pid!, "TERM", true);
+      } catch (e) {
+        // Already gone counts as done.
+        if (!(e instanceof HostRequestError && e.code === "not_found")) failed.push(`${r.port}: ${hostErrorMessage(e, "couldn’t quit")}`);
+      }
+    }),
+  );
+  const deadline = Date.now() + 2500;
+  while (Date.now() < deadline && rows.some((r) => rowByKey(r.key))) {
+    await new Promise((res) => setTimeout(res, 350));
+    await refresh();
+  }
+  const still = rows.filter((r) => rowByKey(r.key));
+  if (failed.length || still.length) {
+    const lines = failed.length ? failed : still.map((r) => `${r.port} is still running.`);
+    state.sweep = { phase: "error", keys: still.map((r) => r.key), message: lines.join(" ") };
+  } else {
+    state.sweep = null;
+    announce(`Quit ${plural(rows.length, "idle server")}`);
+    input.focus({ preventScroll: true });
+  }
+  render();
+}
+
 // ---------- rendering ----------
 
 const rowEls = new Map<string, HTMLLIElement>();
@@ -557,7 +824,9 @@ const auxEls = new Map<string, HTMLLIElement>();
 
 function displayName(r: PortRow): { name: string; unknown: boolean } {
   if (r.source === "tab") return { name: r.title || `localhost:${r.port}`, unknown: false };
-  const name = r.container?.name ?? r.known?.name ?? r.project ?? r.title ?? r.tool ?? r.process;
+  // No project folder: the page's own title names it better than "node".
+  const title = r.source === "host" && !r.project ? meaningfulTitle(metaFor(r)?.title, r.tool, r.process) : null;
+  const name = r.container?.name ?? r.known?.name ?? r.project ?? title ?? r.title ?? r.tool ?? r.process;
   if (name) return { name, unknown: false };
   return { name: r.source === "http" ? "Web server" : "Unknown process", unknown: true };
 }
@@ -604,7 +873,7 @@ function createRow(r: PortRow): HTMLLIElement {
     <button class="row-main" type="button">
       <span class="port"></span>
       <span class="meta">
-        <span class="line1"><span class="name"></span><span class="tool"></span></span>
+        <span class="line1"><img class="favicon" alt="" hidden /><span class="name"></span><span class="tool"></span></span>
         <span class="line2"></span>
       </span>
       <span class="trail"><span class="uptime"></span></span>
@@ -647,6 +916,17 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
   li.classList.toggle("is-hidden", !!hidden);
   li.classList.toggle("stopped", r.source === "tab");
   li.classList.toggle("linked", tabs.length > 0 && r.source !== "tab");
+  const fav = li.querySelector<HTMLImageElement>(".favicon")!;
+  const iconUrl = r.source !== "tab" ? (metaFor(r)?.icon ?? null) : null;
+  if (iconUrl) {
+    if (fav.getAttribute("src") !== iconUrl) fav.src = iconUrl;
+    fav.hidden = false;
+  } else if (!fav.hidden) {
+    fav.hidden = true;
+    fav.removeAttribute("src");
+  }
+  const title = pageTitle(r, name);
+  const shared = r.source === "host" ? tunnelFor(r.port) : undefined;
 
   const tabWord = plural(tabs.length, "tab");
   const tabsHtml =
@@ -656,12 +936,26 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
   const idleHtml = idle
     ? `<span class="sep">·</span><span class="idle" title="Running ${esc(describeUptime(r.startedAt)?.replace(/^Running for /, "") ?? "")} with no tab open">Idle</span>`
     : "";
+  // A public link is the loudest kind of exposure, so it is always on the row while it runs.
+  const sharedHtml = shared
+    ? `<span class="shared" title="Public link: ${esc(shared.url)}">${icon.link(12)}Public</span><span class="sep">·</span>`
+    : "";
 
   let line2: string;
   if (r.source === "tab") {
     line2 = `<span class="gone-label">Server stopped</span><span class="sep">·</span><span class="proc">${tabWord}</span>`;
   } else if (r.source === "http") {
     line2 = `<span class="proc">Answered HTTP${r.status ? ` ${r.status}` : ""}</span>${tabsHtml}`;
+  } else if (title && !r.container) {
+    // The page title says more than "node"; the process stays in the tooltip and label.
+    line2 =
+      sharedHtml +
+      (r.scope === "network"
+        ? `<span class="scope network">${icon.network(12)}Network</span><span class="sep">·</span>`
+        : `<span class="scope local" title="Only reachable from ${DEVICE}">${icon.lock(12)}</span>`) +
+      `<span class="proc page-title" title="${esc(title)}">${esc(title)}</span>` +
+      tabsHtml +
+      idleHtml;
   } else {
     let proc: string;
     if (r.container) {
@@ -674,6 +968,7 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
     }
     // Local is the norm, so it gets a quiet glyph; exposure is the exception and gets a word.
     line2 =
+      sharedHtml +
       (r.scope === "network"
         ? `<span class="scope network">${icon.network(12)}Network</span>${proc ? `<span class="sep">·</span><span class="proc">${esc(proc)}</span>` : ""}`
         : `<span class="scope local" title="Only reachable from ${DEVICE}">${icon.lock(12)}</span>${proc ? `<span class="proc">${esc(proc)}</span>` : ""}`) +
@@ -690,6 +985,8 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
       `Port ${r.port}`,
       name,
       tool,
+      title ?? "",
+      shared ? "shared with a public link" : "",
       r.process && r.process !== name && !r.container ? r.process : "",
       r.pid ? `PID ${r.pid}` : "",
       describeScope(r, DEVICE),
@@ -738,12 +1035,96 @@ function commandHtml(cmd: string): string {
   return `<div class="cmd-line"><code>${esc(cmd)}</code><button class="icon-btn" type="button" data-act="copy-cmd" data-cmd="${esc(cmd)}" aria-label="Copy ${esc(cmd)}" title="Copy command">${icon.copy(14)}</button></div>`;
 }
 
+const PANE_LABEL: Record<SettingsPane, string> = {
+  "airdrop-handoff": "Open AirDrop & Handoff Settings",
+  sharing: "Open Sharing Settings",
+};
+
+function paneButton(k: PortRow["known"]): string {
+  if (!k?.pane || OS !== "mac" || state.mode !== "host") return "";
+  return `<button class="btn" type="button" data-act="open-pane" data-pane="${k.pane}">${esc(PANE_LABEL[k.pane])}</button>`;
+}
+
+function urlLineHtml(url: string): string {
+  return `<div class="cmd-line url-line"><code>${esc(url)}</code>
+    <button class="icon-btn" type="button" data-act="copy-cmd" data-cmd="${esc(url)}" aria-label="Copy ${esc(url)}" title="Copy link">${icon.copy(14)}</button>
+    <button class="icon-btn" type="button" data-act="open-url" data-url="${esc(url)}" aria-label="Open ${esc(url)}" title="Open in a new tab">${icon.open(14)}</button></div>`;
+}
+
+const doneRow = `<div class="confirm-row end"><button class="btn" type="button" data-act="cancel">Done</button></div>`;
+
+function phoneHtml(r: PortRow, name: string): string {
+  const net = state.net;
+  if (net === null || net === "loading") return `<div class="confirm-row"><span class="confirm-text">Finding ${DEVICE === "this Mac" ? "this Mac’s" : "this computer’s"} network address…</span></div>`;
+  if (net === "unsupported" || net === "error") {
+    const msg = net === "unsupported" ? `Open on Phone needs a newer helper. Run ${installText()} again to update it.` : "Couldn’t read this computer’s network addresses.";
+    return `<div class="confirm-row"><span class="confirm-text">${esc(msg)}</span><button class="btn" type="button" data-act="cancel">OK</button></div>`;
+  }
+  if (r.scope === "local") {
+    const hint = exposeHint(r);
+    const how = hint
+      ? `Start ${esc(hint.tool)} with this flag so it listens on your network too:`
+      : "Start it listening on 0.0.0.0 (all interfaces) instead of localhost.";
+    return `<div class="explain"><p class="explain-lead">Only ${esc(DEVICE)} can open ${esc(name)}.</p>
+      <p>It listens on localhost, so a phone can’t reach it. ${how}</p>${hint ? commandHtml(hint.flag) : ""}</div>${doneRow}`;
+  }
+  const url = phoneUrl(r, net.addresses);
+  if (!url) {
+    return `<div class="confirm-row"><span class="confirm-text">${esc(DEVICE === "this Mac" ? "This Mac" : "This computer")} isn’t on a network right now.</span><button class="btn" type="button" data-act="cancel">OK</button></div>`;
+  }
+  return `<div class="phone">
+      <div class="qr-frame">${qrSvg(url, { size: 104, label: `QR code for ${url}` })}</div>
+      <div class="phone-copy">
+        <p class="explain-lead">Scan with your phone’s camera</p>
+        <p>It needs to be on the same Wi‑Fi. Anyone on this network can open it too.</p>
+      </div>
+    </div>${urlLineHtml(url)}${doneRow}`;
+}
+
+const INSTALL_TUNNEL: Record<string, string> = {
+  mac: "brew install cloudflared",
+  win: "winget install --id Cloudflare.cloudflared",
+};
+
+function shareHtml(r: PortRow): string {
+  const port = r.port;
+  const t = tunnelFor(port);
+  const err = state.shareError.get(port);
+  const browser = "Chrome";
+  if (t) {
+    return `<div class="explain"><p class="explain-lead">Public link <span class="muted">· ${esc(t.provider)}</span></p>${urlLineHtml(t.url)}
+      <p>Anyone with the link can open this server. Sharing stops when you stop it, when the server quits, or when ${browser} closes.</p></div>
+      <div class="confirm-row end"><button class="btn" type="button" data-act="stop-share">Stop Sharing</button><button class="btn" type="button" data-act="cancel">Done</button></div>`;
+  }
+  if (state.sharing.has(port)) {
+    return `<div class="confirm-row"><span class="confirm-text">Creating a public link… This takes a few seconds.</span><button class="btn" type="button" data-act="stop-share">Cancel</button></div>`;
+  }
+  if (err) {
+    return `<div class="confirm-row"><span class="confirm-text error">${esc(err)}</span><button class="btn" type="button" data-act="cancel">OK</button></div>`;
+  }
+  const p = state.providers;
+  if (!p) return `<div class="confirm-row"><span class="confirm-text">Checking for cloudflared…</span></div>`;
+  if (!p.cloudflared && !p.ngrok) {
+    const cmd = INSTALL_TUNNEL[OS];
+    return `<div class="explain"><p class="explain-lead">Share a public link with cloudflared</p>
+      <p>It’s free and needs no account. ${cmd ? "Install it once, then come back:" : "Install it from Cloudflare’s downloads page (developers.cloudflare.com), then come back."}</p>
+      ${cmd ? commandHtml(cmd) : ""}</div>${doneRow}`;
+  }
+  const tool = p.cloudflared ? "cloudflared" : "ngrok";
+  return `<div class="explain"><p class="explain-lead">Anyone with the link can open this server.</p>
+      <p>Portlight starts a ${tool} tunnel to localhost:${port} and gives you a public https link. Share it only with people you trust.</p></div>
+      <div class="confirm-row end"><button class="btn" type="button" data-act="cancel">Cancel</button><button class="btn primary" type="button" data-act="start-share">Create Link</button></div>`;
+}
+
 function renderConfirm(li: HTMLLIElement, r: PortRow) {
   const c = state.confirm?.key === r.key ? state.confirm : null;
   li.classList.toggle("confirming", !!c);
   const box = li.querySelector<HTMLElement>(".confirm-content")!;
-  const sig = c ? `${c.phase}|${c.message ?? ""}` : "";
+  // Phone and share panels change with live data (network, tunnel state), so their content is the signature.
+  const live = c?.phase === "phone" ? phoneHtml(r, displayName(r).name) : c?.phase === "share" ? shareHtml(r) : "";
+  const sig = c ? `${c.phase}|${c.message ?? ""}|${live}` : "";
   if (box.dataset.sig === sig) return;
+  const prevPhase = box.dataset.sig?.split("|")[0];
   box.dataset.sig = sig;
   if (!c) {
     // Leave content in place while the panel collapses; clear afterwards.
@@ -757,7 +1138,9 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
   // Homebrew services and the like: Quit works, but it's worth knowing it may come back.
   const note = k && !k.noQuit ? `<div class="confirm-note">${esc(k.about)}${k.command ? commandHtml(k.command) : ""}</div>` : "";
   let html = "";
-  box.classList.toggle("stack", c.phase === "info" || ((c.phase === "ask" || c.phase === "stuck") && !!note));
+  const stacked = c.phase === "info" || c.phase === "phone" || c.phase === "share";
+  box.classList.toggle("stack", stacked || ((c.phase === "ask" || c.phase === "stuck") && !!note));
+  box.classList.toggle("wide", live.includes('class="phone"'));
   if (c.phase === "ask") {
     html = `${note}<div class="confirm-row"><span class="confirm-text">Quit <strong>${proc}</strong>?</span>
       <button class="btn" type="button" data-act="cancel">Cancel</button>
@@ -773,7 +1156,9 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
     const about = k ? `<p>${esc(k.about)}</p>` : "";
     const fix = k?.fix ? `<p class="explain-fix">${esc(k.fix)}</p>` : "";
     html = `<div class="explain">${lead}${about}${fix}${k?.command ? commandHtml(k.command) : ""}</div>
-      <div class="confirm-row end"><button class="btn" type="button" data-act="cancel">Done</button></div>`;
+      <div class="confirm-row end">${paneButton(k)}<button class="btn" type="button" data-act="cancel">Done</button></div>`;
+  } else if (c.phase === "phone" || c.phase === "share") {
+    html = live;
   } else if (c.phase === "notice") {
     html = `<div class="confirm-row"><span class="confirm-text">${esc(c.message ?? "")}</span>
       <button class="btn" type="button" data-act="cancel">OK</button></div>`;
@@ -781,8 +1166,26 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
     html = `<div class="confirm-row"><span class="confirm-text error">${esc(c.message ?? "Couldn’t quit the process.")}</span>
       <button class="btn" type="button" data-act="cancel">OK</button></div>`;
   }
+  // Live panels re-render in place; keep focus where it was unless the panel just opened.
+  const hadFocus = box.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.act : undefined;
   box.innerHTML = html;
-  const focusTarget = box.querySelector<HTMLElement>('[data-act="quit"], [data-act="force"], [data-act="cancel"]');
+  // Taller panels can open below the fold: bring the whole row into view once it has grown.
+  if (c.phase === "phone" || c.phase === "share" || c.phase === "info") {
+    setTimeout(() => {
+      if (box.dataset.sig?.startsWith(c.phase)) li.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+    }, reducedMotion() ? 0 : 320);
+  }
+  if ((c.phase === "phone" || c.phase === "share") && prevPhase === c.phase) {
+    const again = hadFocus ? box.querySelector<HTMLElement>(`[data-act="${hadFocus}"]`) : null;
+    if (again) {
+      again.focus({ preventScroll: true });
+      return;
+    }
+    // Only pull focus into the panel when it hasn't gone somewhere else meanwhile.
+    const a = document.activeElement;
+    if (a && a !== document.body && !li.contains(a)) return;
+  }
+  const focusTarget = box.querySelector<HTMLElement>('[data-act="quit"], [data-act="force"], [data-act="start-share"], [data-act="cancel"], [data-act="stop-share"]');
   // Skip if the panel was dismissed before the frame (e.g. a quick Escape).
   if (focusTarget) requestAnimationFrame(() => box.dataset.sig === sig && focusTarget.focus({ preventScroll: true }));
   if (c.phase === "pending") li.querySelector<HTMLElement>(".row-main")?.focus({ preventScroll: true });
@@ -1158,6 +1561,62 @@ function renderFooter() {
     state.mode === "fallback" ? "Likely free" : near != null ? `Free near ${near}` : "Free port";
   pill.setAttribute("aria-label", port ? `Copy free port ${port}` : "No free port suggestion");
   pill.title = port ? "Copy port number" : "";
+
+  // "Quit N Idle…" takes the keyboard hints' place only while there is something to clean up.
+  const idle = state.query.trim() ? [] : idleRows();
+  const idleBtn = $<HTMLButtonElement>("idle");
+  const label = idle.length ? `Quit ${idle.length} Idle…` : "";
+  if (idleBtn.textContent !== label) idleBtn.textContent = label;
+  idleBtn.hidden = !idle.length;
+  idleBtn.setAttribute("aria-expanded", String(!!state.sweep));
+  idleBtn.title = idle.length
+    ? `${plural(idle.length, "dev server")} running over ${state.settings.idleAfterHours} h with no tab open`
+    : "";
+  $("hints").hidden = !!idle.length;
+  if (state.sweep && !idle.length && state.sweep.phase === "ask") state.sweep = null;
+  renderSweep();
+}
+
+function renderSweep() {
+  const box = $("sweep");
+  const content = $("sweep-content");
+  const sw = state.sweep;
+  box.classList.toggle("open", !!sw);
+  const sig = sw ? `${sw.phase}|${sw.keys.join(",")}|${sw.message ?? ""}` : "";
+  if (content.dataset.sig === sig) return;
+  content.dataset.sig = sig;
+  if (!sw) {
+    setTimeout(() => {
+      if (!content.dataset.sig) content.innerHTML = "";
+    }, 450);
+    return;
+  }
+  const rows = sw.keys.map((k) => rowByKey(k)).filter((r): r is PortRow => !!r);
+  const items = rows
+    .map((r) => {
+      const { name } = displayName(r);
+      const tool = toolLabel(r, name);
+      return `<li><span class="sweep-port">${r.port}</span><span class="sweep-name">${esc(name)}</span>${tool ? `<span class="sweep-tool">${esc(tool)}</span>` : ""}<span class="sweep-age">${esc(formatUptime(r.startedAt) ?? "")}</span></li>`;
+    })
+    .join("");
+  const n = rows.length;
+  let head: string;
+  let actions: string;
+  if (sw.phase === "error") {
+    head = `<p class="sweep-title error">${esc(sw.message ?? "Some servers didn’t quit.")}</p>`;
+    actions = `<button class="btn" type="button" data-act="sweep-cancel">OK</button>`;
+  } else {
+    const pending = sw.phase === "pending";
+    head = `<p class="sweep-title">${pending ? `Quitting ${plural(n, "idle server")}…` : `Quit ${plural(n, "idle server")}?`}</p>
+      <p class="sweep-sub">Running over ${state.settings.idleAfterHours} hours with no tab open. Their child processes quit too.</p>`;
+    actions = `<button class="btn" type="button" data-act="sweep-cancel"${pending ? " disabled" : ""}>Cancel</button>
+      <button class="btn destructive" type="button" data-act="sweep-quit"${pending ? " disabled" : ""}>Quit ${n}</button>`;
+  }
+  content.innerHTML = `${head}${items ? `<ul class="sweep-list">${items}</ul>` : ""}<div class="confirm-row end">${actions}</div>`;
+  if (sw.phase !== "pending") {
+    const target = content.querySelector<HTMLElement>('[data-act="sweep-quit"]') ?? content.querySelector<HTMLElement>('[data-act="sweep-cancel"]');
+    requestAnimationFrame(() => content.dataset.sig === sig && target?.focus({ preventScroll: true }));
+  }
 }
 
 function render(opts: { animate?: boolean } = {}) {
@@ -1184,6 +1643,12 @@ function menuItems(r: PortRow): MenuItem[][] {
     { act: "m-open", label: tabs.length ? "Switch to Tab" : "Open in New Tab", hint: "↩" },
     { act: "m-copy", label: "Copy URL", hint: "⌘C" },
   ]);
+  if (canShare(r)) {
+    sections.push([
+      { act: "m-phone", label: "Open on Phone…" },
+      { act: "m-share", label: tunnelFor(r.port) ? "Public Link…" : "Share Public Link…" },
+    ]);
+  }
   if (r.source === "host" && r.pid && state.mode === "host" && !r.container) {
     const files: MenuItem[] = [{ act: "m-reveal", label: REVEAL_LABEL }];
     if (s.editor !== "none") files.push({ act: "m-editor", label: `Open in ${EDITOR_LABEL[s.editor]}` });
@@ -1265,7 +1730,7 @@ function closeMenu(refocus = true) {
 
 async function runMenuAction(act: string, key: string) {
   const r = rowByKey(key);
-  closeMenu(act !== "kill" && act !== "info");
+  closeMenu(!["kill", "info", "m-phone", "m-share"].includes(act));
   if (!r) return;
   const s = state.settings;
   switch (act) {
@@ -1277,6 +1742,12 @@ async function runMenuAction(act: string, key: string) {
       break;
     case "m-reveal":
       await hostAction(key, "reveal");
+      break;
+    case "m-phone":
+      openPhone(key);
+      break;
+    case "m-share":
+      await openShare(key);
       break;
     case "m-editor":
       await hostAction(key, "editor");
@@ -1366,6 +1837,29 @@ document.addEventListener("click", async (e) => {
       break;
     case "cancel":
       cancelConfirm();
+      break;
+    case "start-share":
+      if (hit) await startShare(hit.key);
+      break;
+    case "stop-share":
+      if (hit) await stopShare(hit.row.port);
+      break;
+    case "open-url":
+      if (typeof chrome !== "undefined" && chrome.tabs?.create) void chrome.tabs.create({ url: btn.dataset.url! });
+      else window.open(btn.dataset.url, "_blank", "noopener");
+      break;
+    case "open-pane":
+      await openPane(btn.dataset.pane as SettingsPane, hit?.key);
+      break;
+    case "sweep":
+      if (state.sweep) closeSweep();
+      else openSweep();
+      break;
+    case "sweep-cancel":
+      closeSweep();
+      break;
+    case "sweep-quit":
+      await runSweep();
       break;
     case "copy-cmd": {
       if (await copyText(btn.dataset.cmd!)) {
@@ -1532,7 +2026,8 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape") {
     e.preventDefault();
-    if (state.confirm) cancelConfirm();
+    if (state.sweep && state.sweep.phase !== "pending") closeSweep();
+    else if (state.confirm) cancelConfirm();
     else if (state.query) {
       setQuery("");
       input.focus();

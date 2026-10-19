@@ -2,8 +2,9 @@
 // extension in Chromium, real TCP servers, and the popup reading them back.
 import { expect, test, type BrowserContext, type Page, type Worker } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { pinnedExtensionId } from "../../scripts/extension-id.mjs";
 import {
   EXT,
@@ -29,6 +30,22 @@ let id: string;
 let page: Page;
 const errors: string[] = [];
 const servers: Record<"vite" | "api" | "docs", Server> = {} as never;
+// A stand-in for cloudflared on PATH: prints a quick-tunnel URL, records its argv and pid, runs until stopped.
+let fakeBin: string;
+const FAKE_URL = "https://real-e2e-quick-tunnel.trycloudflare.com";
+const fakeRun = () => JSON.parse(readFileSync(join(fakeBin, "run.json"), "utf8")) as { argv: string[]; pid: number };
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const ICO = Buffer.from(
+  "AAABAAEAAQEAAAEAIAAwAAAAFgAAACgAAAABAAAAAgAAAAEAIAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAD/gDP/AAAAAA==",
+  "base64",
+);
 
 test.beforeAll(async () => {
   test.setTimeout(180_000);
@@ -38,9 +55,25 @@ test.beforeAll(async () => {
   servers.vite = await startServer({ root: projects.dir, project: "harbor-web", bin: "node_modules/.bin/vite", args: ["--port", String(p1)], port: p1 });
   servers.api = await startServer({ root: projects.dir, project: "shop/server", bin: "bin/serve", port: p2, host: "0.0.0.0" });
   servers.docs = await startServer({ root: projects.dir, project: "field-notes", bin: "serve_docs.py", args: ["http.server"], port: p3, runtime: "python3" });
+  // The Python server serves its project folder: give it a page title and a real favicon.ico.
+  writeFileSync(join(projects.dir, "field-notes", "index.html"), "<!doctype html><title>Field Notes — Trail Log</title><h1>Notes</h1>");
+  writeFileSync(join(projects.dir, "field-notes", "favicon.ico"), ICO);
+  fakeBin = mkdtempSync(join(tmpdir(), "portlight-fake-cf-"));
+  writeFileSync(
+    join(fakeBin, "cloudflared"),
+    `#!${process.execPath}
+require("node:fs").writeFileSync(${JSON.stringify(join(fakeBin, "run.json"))}, JSON.stringify({ argv: process.argv.slice(2), pid: process.pid }));
+process.stderr.write("INF |  ${FAKE_URL}  |\\n");
+setInterval(() => {}, 1000);
+`,
+    { mode: 0o755 },
+  );
+  // Chromium passes its environment to the native host, which looks for cloudflared on PATH.
+  process.env.PATH = `${fakeBin}${delimiter}${process.env.PATH}`;
   ({ context, worker, id } = await launch(installed.userDataDir));
   page = await context.newPage();
-  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  // Chrome logs refused/failed fetches (favicon lookups) itself; JS cannot silence those.
+  page.on("console", (m) => m.type() === "error" && !/Failed to load resource|net::ERR_/.test(m.text()) && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));
   await page.goto(`chrome-extension://${id}/popup.html`);
 });
@@ -50,6 +83,7 @@ test.afterAll(async () => {
   for (const s of Object.values(servers)) s?.stop();
   projects?.cleanup();
   installed?.cleanup();
+  if (fakeBin) rmSync(fakeBin, { recursive: true, force: true });
 });
 
 const row = (port: number) => page.locator(`li.row[data-key^="${port}:"]`);
@@ -81,7 +115,7 @@ test("the popup lists real servers with port, process and project", async () => 
 
   const docs = row(servers.docs.port);
   await expect(docs.locator(".name")).toHaveText("field-notes");
-  await expect(docs.locator(".proc")).toHaveText(/python/i);
+  await expect(docs.locator(".row-main")).toHaveAttribute("aria-label", /python/i);
 
   // Each row is one process: the PID the host reports is the server we started.
   await expect(vite.locator(".row-main")).toHaveAttribute("aria-label", new RegExp(`PID ${servers.vite.pid}\\b`));
@@ -125,6 +159,71 @@ test("suggest offers a port that is actually free", async () => {
   expect(Math.abs(suggested - near)).toBeLessThan(50);
   expect(await isFree(suggested)).toBe(true);
   await page.locator("#q").fill("");
+});
+
+test("favicon and page title come from the real server", async () => {
+  const docs = row(servers.docs.port);
+  await expect(docs.locator(".favicon")).toBeVisible();
+  await expect(docs.locator(".favicon")).toHaveAttribute("src", /^data:image\/(x-icon|vnd\.microsoft\.icon);base64,/);
+  // The title replaces "python3" on the second line; the process stays in the label.
+  await expect(docs.locator(".page-title")).toHaveText("Field Notes — Trail Log");
+  // A server with no title or icon keeps the old look.
+  await expect(row(servers.api.port).locator(".favicon")).toBeHidden();
+  await expect(row(servers.api.port).locator(".proc")).toHaveText("node");
+});
+
+test("open on phone uses the host's real LAN address, or explains why not", async () => {
+  const api = row(servers.api.port);
+  await api.click({ button: "right" });
+  await page.locator("#menu").getByRole("menuitem", { name: "Open on Phone…" }).click();
+  const net = await page.evaluate(() => new Promise<any>((r) => chrome.runtime.sendNativeMessage("com.portlight.host", { id: "n", type: "netinfo" }, r)));
+  expect(net.ok).toBe(true);
+  if (net.addresses.length) {
+    const best = net.addresses.find((a: any) => !a.virtual) ?? net.addresses[0];
+    const host = best.address.includes(":") ? `[${best.address}]` : best.address;
+    await expect(api.locator(".qr")).toBeVisible();
+    await expect(api.locator(".url-line code")).toHaveText(`http://${host}:${servers.api.port}`);
+  } else {
+    await expect(api.locator(".confirm-text")).toContainText("isn’t on a network");
+  }
+  await api.getByRole("button", { name: /Done|OK/ }).click();
+  // The Vite stand-in only listens on 127.0.0.1: no QR, the flag instead.
+  const vite = row(servers.vite.port);
+  await vite.click({ button: "right" });
+  await page.locator("#menu").getByRole("menuitem", { name: "Open on Phone…" }).click();
+  await expect(vite.locator(".cmd-line code")).toHaveText("--host");
+  await expect(vite.locator(".qr")).toHaveCount(0);
+  await vite.getByRole("button", { name: "Done" }).click();
+});
+
+test("share link: created through the background worker, survives the popup closing, stops on request", async () => {
+  const api = row(servers.api.port);
+  await api.click({ button: "right" });
+  await page.locator("#menu").getByRole("menuitem", { name: "Share Public Link…" }).click();
+  await expect(api.locator(".explain-lead")).toHaveText("Anyone with the link can open this server.");
+  await api.getByRole("button", { name: "Create Link" }).click();
+  await expect(api.locator(".url-line code")).toHaveText(FAKE_URL, { timeout: 15_000 });
+  await expect(api.locator(".shared")).toHaveText("Public");
+  const run = fakeRun();
+  expect(run.argv).toEqual(["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${servers.api.port}`, "--http-host-header", `127.0.0.1:${servers.api.port}`]);
+  expect(alive(run.pid)).toBe(true);
+
+  // Closing the popup (and its helper) leaves the tunnel running in the worker's helper.
+  await page.close();
+  await new Promise((r) => setTimeout(r, 1000));
+  expect(alive(run.pid)).toBe(true);
+  page = await context.newPage();
+  page.on("console", (m) => m.type() === "error" && !/Failed to load resource|net::ERR_/.test(m.text()) && errors.push(m.text()));
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`chrome-extension://${id}/popup.html`);
+  const again = row(servers.api.port);
+  await expect(again.locator(".shared")).toHaveText("Public");
+
+  await again.click({ button: "right" });
+  await page.locator("#menu").getByRole("menuitem", { name: "Public Link…" }).click();
+  await again.getByRole("button", { name: "Stop Sharing" }).click();
+  await expect(again.locator(".shared")).toHaveCount(0);
+  await expect.poll(() => alive(run.pid), { timeout: 5000 }).toBe(false);
 });
 
 test("kill quits a real process and the row goes away", async () => {

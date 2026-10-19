@@ -43,6 +43,8 @@
         <div class="state" id="state" hidden></div>
       </main>
 
+      <section class="sweep" id="sweep" aria-live="polite"><div class="sweep-inner"><div class="sweep-content" id="sweep-content"></div></div></section>
+
       <footer class="footer" id="footer">
         <div class="suggest">
           <span class="suggest-label" id="suggest-label">Free port</span>
@@ -51,7 +53,8 @@
             <span class="suggest-glyph" data-icon="copy"></span>
           </button>
         </div>
-        <div class="hints" aria-hidden="true">
+        <button class="footer-action" id="idle" type="button" data-act="sweep" hidden></button>
+        <div class="hints" id="hints" aria-hidden="true">
           <span><kbd class="keycap">↑</kbd><kbd class="keycap">↓</kbd> move</span>
           <span><kbd class="keycap">↩</kbd> open</span>
         </div>

@@ -35,4 +35,6 @@ export const icon = {
     wrap(`<circle cx="10" cy="10" r="6.75"/><path d="M10 9.25v4.25"/><circle cx="10" cy="6.6" r=".6" fill="currentColor"/>`, s),
   tab: (s?: number) => wrap(`<rect x="3" y="4.75" width="14" height="10.5" rx="2.25"/><path d="M3 8.25h14M6 4.75v3.5"/>`, s),
   xmark: (s?: number) => wrap(`<path d="M6 6l8 8M14 6l-8 8"/>`, s),
+  link: (s?: number) =>
+    wrap(`<path d="M8.6 11.4a3.1 3.1 0 0 0 4.4 0l2.6-2.6a3.1 3.1 0 0 0-4.4-4.4l-1 1"/><path d="M11.4 8.6a3.1 3.1 0 0 0-4.4 0l-2.6 2.6a3.1 3.1 0 0 0 4.4 4.4l1-1"/>`, s),
 };
