@@ -1,10 +1,11 @@
 // Helpers for tests that run the real extension against the real native host.
 import { chromium, type BrowserContext, type Worker } from "@playwright/test";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { projectFromCwd } from "../../src/lib/shape.ts";
 
 export const EXT = resolve(import.meta.dirname, "../..");
 export const ROOT = resolve(EXT, "..");
@@ -105,12 +106,25 @@ export interface Server {
   stop(): void;
 }
 
-/** Scratch space for fake projects. Not under the OS temp dir, which the popup treats as "no project". */
+/**
+ * Scratch space for fake projects. The popup shows no project for system paths such as
+ * /private/var or /tmp on macOS, so use the checkout if it lives somewhere ordinary,
+ * otherwise ~/.cache.
+ */
 export function projectsRoot(): { dir: string; cleanup(): void } {
-  const base = join(EXT, ".real-e2e");
+  const inRepo = join(EXT, ".real-e2e");
+  const base = projectFromCwd(join(inRepo, "probe")) === "probe" ? inRepo : join(homedir(), ".cache/portlight-e2e");
   mkdirSync(base, { recursive: true });
   const dir = mkdtempSync(join(base, "run-"));
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    cleanup: () => {
+      rmSync(dir, { recursive: true, force: true });
+      try {
+        rmdirSync(base); // only if no other run is using it
+      } catch {}
+    },
+  };
 }
 
 const NODE_SERVER = `#!/usr/bin/env node
