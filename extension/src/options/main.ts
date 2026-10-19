@@ -111,6 +111,9 @@ function adopt(s: Settings, at = edits) {
 /** Nothing staged and nothing in flight: storage can be taken as the truth. */
 const idle = () => !writer.busy();
 
+/** Hooks that commit input a control is still holding back. */
+const pendingInput: (() => void)[] = [];
+
 /**
  * The tab is closing or hiding. saveSettings() reads before it writes, and a closing page is
  * torn down before that read returns, so a waiting edit would be lost. Write the page's full
@@ -119,6 +122,9 @@ const idle = () => !writer.busy();
  * lands after any older save still in flight, so nothing is rolled back.
  */
 function persistNow() {
+  // Controls that hold typed input back (a debounce timer, or "save on blur") hand it over first:
+  // blur isn't guaranteed when a tab closes, and timers never fire on a page that is gone.
+  for (const take of pendingInput) take();
   if (!writer.busy()) return;
   void writeSettings(settings).catch((e) => console.warn("Portlight: could not save settings", e));
   void writer.flush();
@@ -254,6 +260,7 @@ let preferredTimer: ReturnType<typeof setTimeout> | undefined;
 function checkPreferred(saveNow: boolean) {
   const r = parsePreferredPort(preferred.value);
   clearTimeout(preferredTimer);
+  preferredTimer = undefined;
   if (!r.ok) {
     // Only nag once someone has stopped typing or left the field.
     if (saveNow) setFieldError(preferred, preferredError, r.reason);
@@ -264,6 +271,10 @@ function checkPreferred(saveNow: boolean) {
   if (saveNow) void commit({ preferredPort: r.port });
   else preferredTimer = setTimeout(() => checkPreferred(true), 600);
 }
+// Typed but still waiting for the debounce: commit it now, the same as Enter or blur would.
+pendingInput.push(() => {
+  if (preferredTimer !== undefined) checkPreferred(true);
+});
 preferred.addEventListener("input", () => {
   preferred.value = preferred.value.replace(/\D+/g, "");
   if (preferred.getAttribute("aria-invalid") === "true") setFieldError(preferred, preferredError, null);
@@ -284,6 +295,7 @@ preferred.addEventListener("keydown", (e) => {
     e.preventDefault();
     const n = Math.min(65535, Math.max(1, settings.preferredPort + (e.key === "ArrowUp" ? 1 : -1)));
     clearTimeout(preferredTimer);
+    preferredTimer = undefined;
     preferred.value = String(n);
     setFieldError(preferred, preferredError, null);
     if (n !== settings.preferredPort) void commit({ preferredPort: n });
@@ -365,6 +377,10 @@ for (const f of tokenFields) {
     if (f.box.getAttribute("aria-invalid") === "true") setFieldError(f.box, f.error, null);
   });
   f.input.addEventListener("blur", () => {
+    if (f.input.value.trim()) accept();
+  });
+  // Ports typed but not yet confirmed are saved on blur; do the same when the tab goes away.
+  pendingInput.push(() => {
     if (f.input.value.trim()) accept();
   });
   f.input.addEventListener("paste", (e) => {

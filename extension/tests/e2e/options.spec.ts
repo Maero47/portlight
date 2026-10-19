@@ -412,3 +412,41 @@ test("the popup can later set a value this page wrote before", async ({ page }) 
   await page.evaluate((v) => (window as any).__externalSet(v), zed);
   await expect(editor).toHaveValue("zed");
 });
+
+/** In one synchronous turn: type into a field, then close the tab. Returns what storage saw. */
+async function typeThenClose(page: Page, selector: string, text: string) {
+  return page.evaluate(
+    ({ selector, text, key }) => {
+      const w = window as any;
+      const input = document.querySelector<HTMLInputElement>(selector)!;
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      const before = w.__ops.length;
+      dispatchEvent(new PageTransitionEvent("pagehide"));
+      return { ops: w.__ops.slice(before) as string[], stored: w.__store[key] };
+    },
+    { selector, text, key: KEY },
+  );
+}
+
+test("a port typed into Suggest from survives closing the tab before the debounce", async ({ page }) => {
+  await openOptions(page);
+  const { ops, stored: s } = await typeThenClose(page, "#preferred", "8080");
+  expect(ops).toEqual(["local.set"]);
+  expect(s?.preferredPort).toBe(8080);
+});
+
+test("ports typed but not confirmed survive closing the tab", async ({ page }) => {
+  await openOptions(page);
+  const { ops, stored: s } = await typeThenClose(page, "#hidden-ports-input", "9229, 3000-3001");
+  expect(ops).toEqual(["local.set"]);
+  expect(s?.hiddenPorts).toEqual([3000, 3001, 9229]);
+});
+
+test("an invalid half-typed port writes nothing on close", async ({ page }) => {
+  await openOptions(page);
+  const { ops, stored: s } = await typeThenClose(page, "#preferred", "0");
+  expect(ops).toEqual([]);
+  expect(s).toBeUndefined();
+});
