@@ -250,3 +250,61 @@ test("changes made elsewhere show up live", async ({ page }) => {
   await expect(page.getByLabel("Refresh while open")).toHaveValue("7000");
   await expect(page.getByLabel("Refresh while open").locator("option:checked")).toHaveText("Every 7 seconds");
 });
+
+test("keyboard can remove any port, not just the last", async ({ page }) => {
+  await openOptions(page, { stored: { ...DEFAULT_SETTINGS, hiddenPorts: [5000, 5001, 5002, 9229] } });
+  const input = page.locator("#hidden-ports-input");
+  await input.focus();
+  // Shift+Tab walks back through the × buttons: 9229, 5002, 5001.
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.getByRole("button", { name: "Remove 5001" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expectStored(page, { hiddenPorts: [5000, 5002, 9229] });
+  // Focus moves to the neighbour, so Delete keeps going.
+  await expect(page.getByRole("button", { name: "Remove 5002" })).toBeFocused();
+  await page.keyboard.press("Delete");
+  await expectStored(page, { hiddenPorts: [5000, 9229] });
+  await expect(page.getByRole("button", { name: "Remove 9229" })).toBeFocused();
+});
+
+test("holding an arrow key saves once, not on every repeat", async ({ page }) => {
+  await openOptions(page);
+  const writes = () => page.evaluate(() => (window as any).__writes as number);
+  const pref = page.getByLabel("Suggest from");
+  await pref.focus();
+  for (let i = 0; i < 60; i++) await page.keyboard.press("ArrowUp");
+  await expect(pref).toHaveValue("3060");
+  await expectStored(page, { preferredPort: 3060 });
+  expect(await writes()).toBeLessThanOrEqual(2);
+
+  const before = await writes();
+  const spin = page.getByRole("spinbutton", { name: "Mark as idle after" });
+  await spin.focus();
+  for (let i = 0; i < 40; i++) await page.keyboard.press("ArrowUp");
+  await expect(page.locator("#idle-value")).toHaveText("48 hours");
+  await expectStored(page, { idleAfterHours: 48 });
+  expect((await writes()) - before).toBeLessThanOrEqual(2);
+});
+
+test("a settling edit is written when the page hides", async ({ page }) => {
+  await openOptions(page);
+  await page.getByRole("spinbutton", { name: "Mark as idle after" }).focus();
+  await page.keyboard.press("ArrowDown");
+  await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide")));
+  // Well under the 400 ms settle delay, so only the pagehide flush can have written it.
+  await expect.poll(async () => (await stored(page))?.idleAfterHours, { timeout: 250 }).toBe(7);
+});
+
+test("the popup can later set a value this page wrote before", async ({ page }) => {
+  await openOptions(page);
+  const editor = page.getByLabel("Open projects in");
+  await editor.selectOption("zed");
+  await editor.selectOption("cursor");
+  await expectStored(page, { editor: "cursor" });
+  const zed = { ...(await stored(page))!, editor: "zed" };
+  await page.waitForTimeout(2200);
+  await page.evaluate((v) => (window as any).__externalSet(v), zed);
+  await expect(editor).toHaveValue("zed");
+});

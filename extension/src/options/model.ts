@@ -1,9 +1,8 @@
 // Pure logic behind the options page controls. No DOM, so it is unit-tested directly.
 
-import type { Editor, Group } from "../lib/settings.ts";
+import { clamp, isPort, MAX_IDLE_HOURS, MAX_PORT, MIN_PORT, type Editor, type Group } from "../lib/settings.ts";
 
-export const MIN_PORT = 1;
-export const MAX_PORT = 65535;
+export { clamp, isPort, MAX_PORT, MIN_PORT };
 /** A range like "3000-3010" may add at most this many ports at once. */
 export const MAX_RANGE = 100;
 /** chrome.storage.sync caps one item at 8 KB; this keeps a port list far below it. */
@@ -55,10 +54,6 @@ export function parsePorts(input: string): PortParse {
   return { ports, invalid };
 }
 
-export function isPort(n: unknown): n is number {
-  return typeof n === "number" && Number.isInteger(n) && n >= MIN_PORT && n <= MAX_PORT;
-}
-
 function outOfRange(n: number): string {
   return n === 0 ? "Port 0 isn’t a real port" : `Ports go from ${MIN_PORT} to ${MAX_PORT}`;
 }
@@ -104,7 +99,7 @@ export function parsePreferredPort(input: string): { ok: true; port: number } | 
 
 // ---------- stepper / interval ----------
 
-export const IDLE_MAX_HOURS = 72;
+export const IDLE_MAX_HOURS = MAX_IDLE_HOURS;
 
 /** Step the idle threshold; 0 means off. */
 export function stepIdle(hours: number, delta: number): number {
@@ -114,10 +109,6 @@ export function stepIdle(hours: number, delta: number): number {
 export function formatIdle(hours: number): string {
   if (hours <= 0) return "Off";
   return hours === 1 ? "1 hour" : `${hours} hours`;
-}
-
-export function clamp(n: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : lo));
 }
 
 export const REFRESH_CHOICES = [1000, 2000, 3000, 5000, 10000] as const;

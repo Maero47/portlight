@@ -50,19 +50,54 @@ export const DEFAULT_SETTINGS: Settings = {
 
 const KEY = "portlight.settings";
 
-/** Fill missing or invalid fields with defaults (forward-compatible with older saves). */
+export const MIN_PORT = 1;
+export const MAX_PORT = 65535;
+export const MIN_REFRESH_MS = 500;
+export const MAX_IDLE_HOURS = 72;
+
+const GROUPS: readonly Group[] = ["dev", "database", "docker", "app", "system"];
+const THEMES: readonly Theme[] = ["system", "light", "dark"];
+const EDITORS: readonly Editor[] = ["vscode", "cursor", "zed", "webstorm", "sublime", "none"];
+const MOTIONS: readonly Settings["motion"][] = ["system", "full", "reduced"];
+
+export function isPort(n: unknown): n is number {
+  return typeof n === "number" && Number.isInteger(n) && n >= MIN_PORT && n <= MAX_PORT;
+}
+
+/** Clamp into [lo, hi]; anything that isn't a finite number becomes `lo`. */
+export function clamp(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, Number.isFinite(n) ? n : lo));
+}
+
+const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const oneOf = <T>(list: readonly T[], v: unknown, d: T): T => (list.includes(v as T) ? (v as T) : d);
+const ports = (v: unknown[]): number[] => [...new Set(v.filter(isPort))];
+
+/**
+ * Fill missing or invalid fields with defaults (forward-compatible with older saves).
+ * Values of the right type are also kept within range, so a hand-edited or stale save
+ * can't hand the UI a 0 ms refresh or a port like -1.
+ */
 export function normalizeSettings(raw: unknown): Settings {
-  const s = { ...DEFAULT_SETTINGS } as Settings;
-  if (!raw || typeof raw !== "object") return s;
-  const r = raw as Record<string, unknown>;
-  for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
-    const d = DEFAULT_SETTINGS[k];
-    const v = r[k];
-    if (v === undefined) continue;
-    if (Array.isArray(d) ? Array.isArray(v) : typeof v === typeof d) (s as any)[k] = v;
-  }
-  s.version = 1;
-  return s;
+  const d = DEFAULT_SETTINGS;
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    version: 1,
+    theme: oneOf(THEMES, r.theme, d.theme),
+    hideSystem: typeof r.hideSystem === "boolean" ? r.hideSystem : d.hideSystem,
+    hiddenPorts: Array.isArray(r.hiddenPorts) ? ports(r.hiddenPorts) : [...d.hiddenPorts],
+    hiddenProcesses: Array.isArray(r.hiddenProcesses)
+      ? r.hiddenProcesses.filter((p): p is string => typeof p === "string" && p.trim() !== "")
+      : [...d.hiddenProcesses],
+    badgeGroups: Array.isArray(r.badgeGroups) ? GROUPS.filter((g) => (r.badgeGroups as unknown[]).includes(g)) : [...d.badgeGroups],
+    groupRows: typeof r.groupRows === "boolean" ? r.groupRows : d.groupRows,
+    preferredPort: finite(r.preferredPort) ? Math.round(clamp(r.preferredPort, MIN_PORT, MAX_PORT)) : d.preferredPort,
+    extraProbePorts: Array.isArray(r.extraProbePorts) ? ports(r.extraProbePorts) : [...d.extraProbePorts],
+    refreshMs: finite(r.refreshMs) ? Math.round(Math.max(MIN_REFRESH_MS, r.refreshMs)) : d.refreshMs,
+    editor: oneOf(EDITORS, r.editor, d.editor),
+    motion: oneOf(MOTIONS, r.motion, d.motion),
+    idleAfterHours: finite(r.idleAfterHours) ? Math.round(clamp(r.idleAfterHours, 0, MAX_IDLE_HOURS)) : d.idleAfterHours,
+  };
 }
 
 export async function loadSettings(): Promise<Settings> {

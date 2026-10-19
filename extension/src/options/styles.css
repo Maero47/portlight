@@ -710,6 +710,12 @@ label.row {
   color: var(--label);
 }
 
+.token-x:focus-visible {
+  outline-width: 2px;
+  outline-offset: 0;
+  color: var(--label);
+}
+
 .tokens input {
   flex: 1 1 120px;
   min-width: 120px;

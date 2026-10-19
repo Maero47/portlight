@@ -61,26 +61,84 @@ let queue: Promise<unknown> = Promise.resolve();
 let savedTimer: ReturnType<typeof setTimeout> | undefined;
 /** Saves still in flight. Their storage echoes would briefly undo newer optimistic edits. */
 let pending = 0;
+/** Edits waiting to be written; repeating keys pile up here instead of each hitting storage. */
+let staged: Partial<Settings> = {};
+let stageTimer: ReturnType<typeof setTimeout> | undefined;
+/** chrome.storage.sync allows 120 writes a minute; a held arrow key repeats ~30 times a second. */
+const SETTLE_MS = 400;
+/** Bumped on every local edit, so a storage read that started earlier can tell it is stale. */
+let edits = 0;
+/**
+ * What our own saves wrote in the last couple of seconds. A late echo of an older one must not
+ * roll the page back; entries expire so a later identical change from the popup still lands.
+ */
+let ownWrites: { snap: string; at: number }[] = [];
+const ECHO_MS = 2000;
+const snapshot = (s: Settings) => JSON.stringify(s);
 
-function commit(patch: Partial<Settings>) {
+/**
+ * Apply an edit now and save it. With `settle`, the write waits until the value has been
+ * still for SETTLE_MS, so holding a key produces one write instead of dozens.
+ */
+function commit(patch: Partial<Settings>, settle = false) {
   settings = { ...settings, ...patch };
+  edits++;
   render();
+  staged = { ...staged, ...patch };
+  clearTimeout(stageTimer);
+  stageTimer = undefined;
+  if (settle) {
+    stageTimer = setTimeout(flush, SETTLE_MS);
+    return queue;
+  }
+  return flush();
+}
+
+function flush() {
+  clearTimeout(stageTimer);
+  stageTimer = undefined;
+  const patch = staged;
+  staged = {};
+  if (!Object.keys(patch).length) return queue;
   pending++;
   queue = queue
     .then(() => saveSettings(patch))
-    .finally(() => {
-      // Once the last save lands, take storage as the truth (it may hold edits from the popup).
-      if (--pending === 0) void loadSettings().then((s) => pending === 0 && ((settings = s), render()));
-    })
     .then(
-      () => showSaved(),
+      (saved) => {
+        const now = Date.now();
+        ownWrites = [...ownWrites.filter((w) => now - w.at < ECHO_MS), { snap: snapshot(saved), at: now }];
+        showSaved();
+      },
       (e) => {
         console.warn("Portlight: could not save settings", e);
         announce("Couldn’t save. Try again.");
       },
-    );
+    )
+    .finally(() => {
+      // Once the last save lands, take storage as the truth (it may hold edits from the popup).
+      if (--pending === 0) resync();
+    });
   return queue;
 }
+
+function resync() {
+  const at = edits;
+  void loadSettings().then((s) => adopt(s, at));
+}
+
+/** Take settings read from storage, unless the page has been edited since the read began. */
+function adopt(s: Settings, at = edits) {
+  if (!idle() || at !== edits) return;
+  settings = s;
+  render();
+}
+
+/** Nothing staged and nothing in flight: storage can be taken as the truth. */
+const idle = () => pending === 0 && stageTimer === undefined;
+
+// Don't lose a settling edit when the tab closes or hides.
+addEventListener("pagehide", () => void flush());
+document.addEventListener("visibilitychange", () => document.hidden && void flush());
 
 function showSaved() {
   const el = $("saved");
@@ -158,7 +216,7 @@ function renderSwitches() {
 const spin = document.querySelector<HTMLElement>(".stepper-arrows")!;
 function stepBy(delta: number) {
   const next = stepIdle(settings.idleAfterHours, delta);
-  if (next !== settings.idleAfterHours) void commit({ idleAfterHours: next });
+  if (next !== settings.idleAfterHours) void commit({ idleAfterHours: next }, true);
 }
 spin.addEventListener("click", (e) => {
   const b = (e.target as HTMLElement).closest<HTMLElement>("[data-step]");
@@ -239,8 +297,10 @@ preferred.addEventListener("keydown", (e) => {
   if (e.key === "ArrowUp" || e.key === "ArrowDown") {
     e.preventDefault();
     const n = Math.min(65535, Math.max(1, settings.preferredPort + (e.key === "ArrowUp" ? 1 : -1)));
+    clearTimeout(preferredTimer);
     preferred.value = String(n);
-    checkPreferred(true);
+    setFieldError(preferred, preferredError, null);
+    if (n !== settings.preferredPort) void commit({ preferredPort: n }, true);
   }
 });
 
@@ -308,6 +368,13 @@ for (const f of tokenFields) {
       setFieldError(f.box, f.error, null);
     }
   });
+  // Backspace or Delete on a focused ×, as in a macOS token field.
+  f.list.addEventListener("keydown", (e) => {
+    const rm = (e.target as HTMLElement).closest<HTMLElement>("[data-remove]");
+    if (!rm || (e.key !== "Backspace" && e.key !== "Delete")) return;
+    e.preventDefault();
+    removeToken(f, Number(rm.dataset.remove), true);
+  });
   f.input.addEventListener("input", () => {
     if (f.box.getAttribute("aria-invalid") === "true") setFieldError(f.box, f.error, null);
   });
@@ -324,14 +391,24 @@ for (const f of tokenFields) {
   f.box.addEventListener("click", (e) => {
     const rm = (e.target as HTMLElement).closest<HTMLElement>("[data-remove]");
     if (rm) {
-      const port = Number(rm.dataset.remove);
-      void commit({ [f.key]: removePort(settings[f.key], port) } as Partial<Settings>);
-      announce(`Removed ${port}`);
-      f.input.focus();
+      removeToken(f, Number(rm.dataset.remove), e.detail === 0);
       return;
     }
     if (e.target === f.box || e.target === f.list) f.input.focus();
   });
+}
+
+type TokenField = (typeof tokenFields)[number];
+
+/** Remove one port. From the keyboard, focus lands on the neighbouring ×, else the input. */
+function removeToken(f: TokenField, port: number, keyboard: boolean) {
+  const list = settings[f.key];
+  const i = list.indexOf(port);
+  const neighbour = list[i + 1] ?? list[i - 1];
+  void commit({ [f.key]: removePort(list, port) } as Partial<Settings>);
+  announce(`Removed ${port}`);
+  const next = keyboard && neighbour !== undefined ? f.list.querySelector<HTMLElement>(`[data-remove="${neighbour}"]`) : null;
+  (next ?? f.input).focus();
 }
 
 function renderTokens() {
@@ -340,7 +417,7 @@ function renderTokens() {
     const html = ports
       .map(
         (p) =>
-          `<li class="token" data-port="${p}"><span>${p}</span><button type="button" class="token-x" data-remove="${p}" aria-label="Remove ${p}" tabindex="-1"><svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.75 1.75l4.5 4.5M6.25 1.75l-4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></li>`,
+          `<li class="token" data-port="${p}"><span>${p}</span><button type="button" class="token-x" data-remove="${p}" aria-label="Remove ${p}"><svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.75 1.75l4.5 4.5M6.25 1.75l-4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button></li>`,
       )
       .join("");
     if (f.list.dataset.html !== html) {
@@ -526,9 +603,11 @@ async function start() {
   // Turn transitions on only after the first paint, so nothing animates into place.
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add("ready")));
   onSettingsChanged((s) => {
-    if (pending > 0) return;
-    settings = s;
-    render();
+    const snap = snapshot(s);
+    const recent = ownWrites.filter((w) => Date.now() - w.at < ECHO_MS);
+    const stale = recent.some((w) => w.snap === snap) && recent.at(-1)?.snap !== snap;
+    if (stale) return; // a late echo of an older save of ours
+    adopt(s);
   });
   void checkHost();
 }
