@@ -190,3 +190,14 @@ test("host survives bad JSON and answers the next request", async () => {
   const res = await host.request({ type: "ping" });
   assert.equal(res.type, "pong");
 });
+
+test("netinfo reports the hostname and only non-loopback addresses", { skip: !supported }, async () => {
+  const res = await host.request({ type: "netinfo" });
+  assert.equal(res.ok, true);
+  assert.equal(res.hostname, os.hostname());
+  assert.ok(Array.isArray(res.addresses));
+  for (const a of res.addresses) {
+    assert.ok(!["127.0.0.1", "::1"].includes(a.address), a.address);
+    assert.match(a.family, /^IPv[46]$/);
+  }
+});

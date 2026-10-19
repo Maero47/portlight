@@ -262,7 +262,7 @@ for (const scheme of ["light", "dark"] as const) {
       await row.locator('[data-act="menu"]').click();
       await expect(page.locator("#menu")).toBeVisible();
       await expect(page.locator("#menu .menu-item")).toHaveText([
-        "Switch to Tab↩", "Copy URL⌘C", "Reveal in Finder", "Open in VS Code", "Hide Port 5173", "Hide All “node”", "Quit node…⌘⌫",
+        "Switch to Tab↩", "Copy URL⌘C", "Open on Phone…", "Share Public Link…", "Reveal in Finder", "Open in VS Code", "Hide Port 5173", "Hide All “node”", "Quit node…⌘⌫",
       ]);
       await expect(page.locator("#menu .menu-item").first()).toBeFocused();
       await page.waitForTimeout(250);

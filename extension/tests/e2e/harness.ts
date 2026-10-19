@@ -30,6 +30,18 @@ export interface MockOptions {
   oldHost?: boolean;
   /** Pretend a process comes straight back after Quit (launchd / brew services). */
   respawn?: number[];
+  /** What the background worker reports about share links. */
+  tunnel?: MockTunnel;
+  /** LAN addresses for netinfo; null = a helper that doesn't know netinfo. */
+  lan?: { name: string; address: string; family: "IPv4" | "IPv6"; virtual: boolean }[] | null;
+}
+export interface MockTunnel {
+  providers?: { cloudflared: boolean; ngrok: boolean };
+  /** Already running (or still starting, url null) when the popup opens. */
+  running?: { port: number; url: string | null; state?: "starting" | "running" }[];
+  /** start: answer with this URL (default), or fail with this message. */
+  startError?: string;
+  startDelayMs?: number;
 }
 export const PINNED_ID = pinnedExtensionId();
 
@@ -45,12 +57,18 @@ export async function openPopup(
     tabs?: MockTab[];
     oldHost?: boolean;
     respawn?: number[];
+    tunnel?: MockTunnel;
+    lan?: MockOptions["lan"];
+    /** Favicons (SVG markup) per port, linked from the page that port serves. */
+    favicons?: Record<number, string>;
   } = {},
 ) {
-  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID, settings, tabs, oldHost, respawn } = opts;
+  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID, settings, tabs, oldHost, respawn, tunnel, favicons = {} } = opts;
+  const lan = opts.lan === undefined ? [{ name: "en0", address: "192.168.1.23", family: "IPv4" as const, virtual: false }] : opts.lan;
   const errors: string[] = [];
   page.on("console", (m) => {
-    if (m.type() === "error") errors.push(m.text());
+    // Chrome logs every refused or failed fetch itself (favicon lookups, HTTP probes); JS cannot silence those.
+    if (m.type() === "error" && !/Failed to load resource|net::ERR_/.test(m.text())) errors.push(m.text());
   });
   page.on("pageerror", (e) => errors.push(String(e)));
 
@@ -62,25 +80,30 @@ export async function openPopup(
   });
   // HTTP fallback probes: only the ports in `httpPorts` answer.
   await page.route(/^http:\/\/localhost:\d+\//, (route) => {
-    const port = Number(new URL(route.request().url()).port);
+    const url = new URL(route.request().url());
+    const port = Number(url.port);
+    // Playwright can't intercept /favicon.ico itself, so mocked pages link their icon (unit tests cover /favicon.ico).
+    if (url.pathname === "/icon.svg" && favicons[port]) {
+      return route.fulfill({ status: 200, contentType: "image/svg+xml", headers: { "access-control-allow-origin": "*" }, body: favicons[port] });
+    }
     const title = httpPorts[port];
     if (title === undefined) return route.abort("connectionrefused");
     return route.fulfill({
       status: 200,
       contentType: "text/html",
       headers: { "access-control-allow-origin": "*" },
-      body: `<!doctype html><title>${title}</title>`,
+      body: `<!doctype html><title>${title}</title>${favicons[port] ? `<link rel="icon" href="/icon.svg">` : ""}`,
     });
   });
 
   await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
-  await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn } satisfies MockOptions);
+  await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn, tunnel, lan } satisfies MockOptions);
   await page.goto(`${ORIGIN}/popup.html`);
   return { errors };
 }
 
 /** Runs in the page. Keep it self-contained. */
-function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respawn = [] }: MockOptions) {
+function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respawn = [], tunnel = {}, lan = [] }: MockOptions) {
   const now = Date.now();
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const L = (port: number, address: string, process: string, pid: number, cwd: string | null, command: string, startedMin: number, container: any = undefined) => ({
@@ -112,6 +135,8 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
           }),
         ]
       : [];
+  // Lets a test change what the "host" reports, e.g. a server restarting under a new pid.
+  (window as any).__mutate = (fn: (l: any[]) => any[]) => void (listeners = fn(listeners));
   const opened: string[] = [];
   (window as any).__opened = opened;
   (window as any).__requests = [];
@@ -157,6 +182,14 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
       case "openEditor":
         if (oldHost) return { id: msg.id, ok: false, error: { code: "bad_request", message: `unknown request type: "${msg.type}"` } };
         res = { type: msg.type, path: listeners.find((l) => l.pid === msg.pid)?.cwd ?? "/" };
+        break;
+      case "netinfo":
+        if (oldHost || lan === null) return { id: msg.id, ok: false, error: { code: "bad_request", message: `unknown request type: "${msg.type}"` } };
+        res = { type: "netinfo", hostname: "studio.local", addresses: lan };
+        break;
+      case "openSettings":
+        if (oldHost) return { id: msg.id, ok: false, error: { code: "bad_request", message: `unknown request type: "${msg.type}"` } };
+        res = { type: "openSettings", pane: msg.pane };
         break;
     }
     return { id: msg.id, ok: true, ...res };
@@ -215,6 +248,26 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
   let tabList = tabs.map((t, i) => ({ id: 100 + i, windowId: t.windowId ?? 1, url: t.url, title: t.title, active: false, lastAccessed: now - i * 1000 }));
   (window as any).__tabs = () => tabList;
   runtime.openOptionsPage = async () => void ((window as any).__optionsOpened += 1);
+  // The background worker's share-link service, as the popup sees it through sendMessage.
+  const providers = tunnel.providers ?? { cloudflared: true, ngrok: false };
+  let running = (tunnel.running ?? []).map((t) => ({ state: "running", ...t, provider: "cloudflared", startedAt: new Date(now).toISOString() }));
+  const tunnelMsgs: any[] = [];
+  (window as any).__tunnelMsgs = tunnelMsgs;
+  runtime.sendMessage = async (msg: any) => {
+    if (msg?.type !== "portlight:tunnel") return undefined;
+    tunnelMsgs.push(msg);
+    if (msg.op === "start") {
+      await new Promise((r) => setTimeout(r, tunnel.startDelayMs ?? 30));
+      if (tunnel.startError) return { ok: false, code: "internal", message: tunnel.startError };
+      running = [
+        ...running,
+        { port: msg.port, url: "https://quiet-harbor-lights.trycloudflare.com", state: "running", provider: "cloudflared", startedAt: new Date().toISOString() },
+      ];
+    } else if (msg.op === "stop") {
+      running = running.filter((t) => t.port !== msg.port);
+    }
+    return { ok: true, providers: msg.op === "status" ? null : providers, tunnels: running };
+  };
   const noopEvent = { addListener() {}, removeListener() {} };
   function area(data: Record<string, any>, name: string) {
     return {
@@ -243,9 +296,9 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
     },
     tabs: {
       create: async (o: { url: string }) => void opened.push(o.url),
-      // Real Chrome filters by the URL patterns; the mock keeps only http://localhost and 127.0.0.1.
+      // Real Chrome filters by the URL patterns; the mock keeps localhost, 127.0.0.1, [::1] and *.localhost.
       query: async (q: { url?: string[] }) =>
-        tabList.filter((t) => !q.url || /^http:\/\/(localhost|127\.0\.0\.1)[:/]/.test(t.url)).map((t) => ({ ...t })),
+        tabList.filter((t) => !q.url || /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]|[\w-]+\.localhost)[:/]/.test(t.url)).map((t) => ({ ...t })),
       update: async (tabId: number, props: any) => void focused.push({ tabId, ...props }),
       remove: async (ids: number[]) => {
         tabList = tabList.filter((t) => !ids.includes(t.id));

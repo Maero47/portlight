@@ -8,7 +8,9 @@ Chrome toolbar button.
 - **Every listener:** port, project folder, recognised tool (Vite, Next.js, Uvicorn…), process and uptime.
   Servers reachable from your network are marked.
 - **Type a port** to see whether it's free; the footer always offers the nearest free one.
-- **Quit** a stray dev server from the popup (asks first; only your own processes).
+- **Quit** a stray dev server from the popup (asks first; only your own processes), or every idle one at once.
+- **Open on Phone** shows a QR code for your LAN address; **Share Public Link** starts a cloudflared (or ngrok)
+  tunnel when one is installed.
 
 Works in Chrome, Chromium, Brave, Edge, Arc and Vivaldi on macOS, Linux and Windows.
 
@@ -60,8 +62,10 @@ Nothing leaves your computer. There is no account, analytics or remote server.
 
 - The helper only reads local socket and process tables, and only answers this extension
   (its manifest lists this extension's ID and nothing else).
-- The extension's only web access is `http://localhost` and `http://127.0.0.1`, used by
-  the HTTP fallback.
+- The extension's only web access is `http://localhost`, `127.0.0.1`, `[::1]` and `*.localhost`: the HTTP
+  fallback, tab linking, and each local server's favicon and page title.
+- **Share Public Link** is the one exception, and only when you click it: it exposes that server to anyone with
+  the link through Cloudflare (or ngrok) until you stop it, the server stops, or the browser quits.
 - Quitting a process asks first, and the helper refuses anything that isn't yours or isn't
   holding a listening port — including the browser itself.
 

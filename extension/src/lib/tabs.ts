@@ -1,10 +1,11 @@
 import { tabsByPort, type TabRef } from "./view.ts";
 
 /**
- * Tabs pointed at local servers. No "tabs" permission: the existing host permissions for
- * http://localhost and http://127.0.0.1 are what let tabs.query match and read these URLs.
+ * Tabs pointed at local servers. No "tabs" permission: the host permissions for localhost,
+ * 127.0.0.1, *.localhost (app.localhost, portless/Caddy setups) and [::1] are what let
+ * tabs.query match and read these URLs.
  */
-export const LOCAL_TAB_PATTERNS = ["http://localhost/*", "http://127.0.0.1/*"];
+export const LOCAL_TAB_PATTERNS = ["http://localhost/*", "http://127.0.0.1/*", "http://*.localhost/*", "http://[::1]/*"];
 
 export async function localTabs(): Promise<Map<number, TabRef[]>> {
   if (typeof chrome === "undefined" || !chrome.tabs?.query) return new Map();

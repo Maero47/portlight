@@ -11,7 +11,33 @@ export type Request =
   | { id: string; type: "suggest"; near?: number; count?: number } // free ports, closest to `near`
   | { id: string; type: "kill"; pid: number; signal?: "TERM" | "KILL"; tree?: boolean } // tree: also its child processes
   | { id: string; type: "reveal"; pid: number }                                         // show the process cwd in Finder / file manager
-  | { id: string; type: "openEditor"; pid: number; editor: string };                    // open the process cwd in an editor (one of EditorId)
+  | { id: string; type: "openEditor"; pid: number; editor: string }                     // open the process cwd in an editor (one of EditorId)
+  | { id: string; type: "netinfo" }                                                     // hostname + LAN addresses, for "Open on Phone"
+  | { id: string; type: "openSettings"; pane: SettingsPane }                            // macOS only: open a fixed System Settings pane
+  | { id: string; type: "tunnelStatus" }                                                // installed tunnel tools + running share links
+  | { id: string; type: "tunnelStart"; port: number; provider?: TunnelProvider }       // public URL for one of your listening ports
+  | { id: string; type: "tunnelStop"; port: number };
+
+/** System Settings panes the host can open (macOS). */
+export type SettingsPane = "airdrop-handoff" | "sharing";
+
+/** Tunnel binaries the host may start; cloudflared is preferred (quick tunnels need no account). */
+export type TunnelProvider = "cloudflared" | "ngrok";
+
+export interface Tunnel {
+  port: number;
+  provider: TunnelProvider;
+  url: string | null;       // public https URL; null while starting
+  startedAt: string;        // ISO
+  state: "starting" | "running"; // starting: the tool hasn't printed its URL yet
+}
+
+export interface LanAddress {
+  name: string;             // interface, e.g. "en0"
+  address: string;
+  family: "IPv4" | "IPv6";
+  virtual: boolean;         // VPN / VM / container bridge: rarely what a phone can reach
+}
 
 /** Editors the host accepts for openEditor; anything else is bad_request. */
 export type EditorId = "vscode" | "cursor" | "zed" | "webstorm" | "sublime";
@@ -46,4 +72,9 @@ export type Response =
   | { id: string; ok: true; type: "kill"; pid: number; killed?: number[] }    // killed: every pid signalled, `pid` first
   | { id: string; ok: true; type: "reveal"; path: string }
   | { id: string; ok: true; type: "openEditor"; path: string }
-  | { id: string; ok: false; error: { code: "bad_request" | "not_permitted" | "not_found" | "internal"; message: string } };
+  | { id: string; ok: true; type: "netinfo"; hostname: string; addresses: LanAddress[] }  // best address first
+  | { id: string; ok: true; type: "openSettings"; pane: SettingsPane }
+  | { id: string; ok: true; type: "tunnelStatus"; providers: Record<TunnelProvider, boolean>; tunnels: Tunnel[] }
+  | { id: string; ok: true; type: "tunnelStart"; tunnel: Tunnel }
+  | { id: string; ok: true; type: "tunnelStop"; port: number; stopped: boolean }
+  | { id: string; ok: false; error: { code: "bad_request" | "not_permitted" | "not_found" | "cancelled" | "internal"; message: string } }; // cancelled: tunnelStart stopped before it finished

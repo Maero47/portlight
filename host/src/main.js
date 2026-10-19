@@ -43,11 +43,25 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+// Share-link tunnels are our children: they never outlive the host.
+// Every exit path ends here: SIGKILL whatever is left, synchronously — no timer survives exit.
+process.on("exit", () => handle.close({ force: true }));
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(sig, () => {
+    handle.close({ force: true });
+    process.exit(128);
+  });
+}
+
 // Chrome closes stdin when the port disconnects; finish outstanding work, then exit.
 process.stdin.on("end", async () => {
+  handle.close(); // a tunnel still waiting for its URL fails fast instead of holding the host open
   await Promise.allSettled([...inflight]);
   process.stdout.end(() => process.exit());
 });
 process.stdin.on("close", () => {
-  if (inflight.size === 0) process.stdout.end(() => process.exit());
+  if (inflight.size === 0) {
+    handle.close();
+    process.stdout.end(() => process.exit());
+  }
 });

@@ -27,7 +27,7 @@ For everyday use, run `./install.sh` in the repository root instead.
   one, the right command (`docker stop shop-db-1`, `brew services stop postgresql@16`).
 - `src/lib/view.ts` — hiding rules (`hideSystem`, `hiddenPorts`, `hiddenProcesses`), the badge count,
   tab ↔ port mapping and idle detection. Pure functions, unit tested.
-- `src/lib/tabs.ts` — finds tabs open on `http://localhost` / `http://127.0.0.1`. Clicking a port that
+- `src/lib/tabs.ts` — finds tabs open on `http://localhost`, `127.0.0.1`, `[::1]` and `*.localhost`. Clicking a port that
   already has a tab switches to it (and its window) instead of opening a duplicate; tabs whose server
   has stopped get their own section with Switch and Close. No `tabs` permission: the existing host
   permissions are what let `tabs.query` match those URLs.
@@ -38,6 +38,19 @@ For everyday use, run `./install.sh` in the repository root instead.
   `ping` 52 → 1 ms, and no process spawned every 2 s); the badge worker uses one-off
   `sendNativeMessage` calls so it never keeps the service worker alive.
 - `src/lib/platform.ts` — "this Mac" vs "this computer", and the install command onboarding shows.
+- `src/lib/meta.ts` — favicon and `<title>` of local web servers, fetched after the list paints (1.2 s timeout,
+  no redirects, same-origin icons only, ≤ 24 KB) and cached per port + pid in `localStorage`. The icon leads the
+  row's name; a title that says more than the folder (not "Vite + React + TS") replaces the process name.
+- `src/lib/phone.ts`, `src/lib/qr.ts` — "Open on Phone…": the host's LAN address (`netinfo`) as a QR code drawn by
+  a small local encoder (no network, no dependency). Servers that only listen on localhost get the flag that
+  exposes them instead (`--host` for Vite, `-H 0.0.0.0` for Next.js, …).
+- `src/lib/tunnels.ts` — "Share Public Link…": the popup asks the background worker, which owns the tunnel so it
+  survives the popup closing. The worker keeps one `connectNative` port open only while a link runs (that also
+  keeps the worker alive) and polls it every 5 s; when the last link stops, the helper exits. Rows with a live
+  link show "Public". Without cloudflared/ngrok the panel shows the one-line install.
+- Idle cleanup — dev servers running longer than `idleAfterHours` with no tab (not hidden, not shared, not
+  containers or OS services) are offered as "Quit N Idle…" in the footer; one confirm quits them with their child
+  processes.
 - `src/lib/probe.ts` — fallback when the host is missing: probes common dev ports, the user's
   `extraProbePorts` and any port open in a tab over HTTP. Results are labelled "HTTP only"; databases and
   other non-HTTP services are invisible this way. AirPlay Receiver is recognised by its `Server: AirTunes`
@@ -63,7 +76,7 @@ the requests go through with no prompt, because the manifest's `http://localhost
 | `↩` | Switch to the tab showing that port, or open `http://localhost:PORT` |
 | `⌘C` | Copy URL of the focused port |
 | `⌘⌫` / `Delete` | Quit the focused process (asks first), or explain why it can't be quit |
-| `⇧F10`, menu key or right-click | Row menu: Reveal in Finder, Open in editor, Hide port / app, Quit |
+| `⇧F10`, menu key or right-click | Row menu: Open on Phone, Share Public Link, Reveal in Finder, Open in editor, Hide port / app, Quit |
 | `Esc` | Cancel, clear search, then close |
 
 Typing a number in search checks that port and suggests the nearest free one.

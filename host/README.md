@@ -78,6 +78,25 @@ with `--enable-logging=stderr`.
 | `kill`    | sends TERM (default) or KILL, only to a pid that owns a listening port right now and runs as the current user (same uid on macOS/Linux, `tasklist /V` owner on Windows). Refuses the host itself and every process above it (launcher shell, browser), and container engine forwarders. With `tree: true` it also signals the pid's descendants (parent first; same user, never protected pids) and returns every pid it signalled in `killed` |
 | `reveal`  | opens the listener's working directory in Finder (`open`), the file manager (`xdg-open`) or Explorer. Same ownership rules as `kill` |
 | `openEditor` | opens the working directory in `vscode`, `cursor`, `zed`, `webstorm` or `sublime` (fixed list). macOS uses the app bundle (`open -a`), otherwise the editor's CLI; Windows only real `.exe` files. `not_found` when the editor isn't installed |
+| `netinfo` | hostname and non-loopback addresses, best first (physical IPv4, then IPv6, then VPN/VM/container bridges; no link-local), for "Open on Phone" |
+| `openSettings` | macOS only: opens one of a fixed set of System Settings panes (`airdrop-handoff`, `sharing`) with `open x-apple.systempreferences:…` (the macOS 12 pane before Ventura). `not_found` elsewhere |
+| `tunnelStatus` | which tunnel tools are installed (`cloudflared`, `ngrok`) and the share links running |
+| `tunnelStart` | public URL for `port` via a cloudflared quick tunnel (preferred, no account) or ngrok. Only for a port that listens right now and belongs to the current user (or is published by your container engine). Forwards to the loopback address the server listens on, rewrites the Host header so dev servers accept it, and waits up to 25 s for the URL. At most 4 at a time |
+| `tunnelStop` | stops the share link on `port` |
+
+### Share links
+
+Tunnels are child processes of the host, started with `spawn` and a fixed argument list (never a
+shell), from a binary named exactly `cloudflared` or `ngrok` on PATH or in the usual Homebrew
+locations. A start registers its port as `starting` before the port check runs, so `tunnelStop`
+cancels it at any point: before the binary is spawned (nothing starts), after (the process is killed),
+or as the URL arrives (it is never returned); the start then fails with `cancelled`. A tunnel stops when asked, when its port stops listening (checked every 5 s, two misses
+in a row), and when the host exits (stdin closed, SIGTERM/SIGINT/SIGHUP or normal exit). A normal stop
+sends SIGTERM (cloudflared runs with `--grace-period 1s`) and SIGKILL 2 s later; on host exit every tunnel
+child, including ones still shutting down, gets SIGKILL synchronously, since no timer survives the exit. If the host
+is killed with SIGKILL its tunnel can outlive it, since macOS has no "die with parent". The extension
+runs share links from its background worker, which keeps one host connection open only while a
+tunnel runs.
 
 ### Containers
 
@@ -97,5 +116,6 @@ npm test
 ```
 
 Parsers are tested against captured `lsof`/`ss`/`/proc`/`netstat`/`tasklist`/`docker ps`/`podman ps`
-output in `test/fixtures`; reveal/editor argv building is tested without launching anything. The integration tests start a real TCP server and a real host
-process (macOS/Linux), and run the installer against a temporary `HOME`.
+output in `test/fixtures`; reveal/editor/settings argv building is tested without launching anything. The integration tests start a real TCP server and a real host
+process (macOS/Linux), run the installer against a temporary `HOME`, and drive the full tunnel lifecycle
+with a fake `cloudflared` on PATH (start, URL, stop, and cleanup when stdin closes).

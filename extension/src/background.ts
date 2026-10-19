@@ -1,4 +1,5 @@
-import { HostClient } from "./lib/host.ts";
+import { HostClient, portTransport } from "./lib/host.ts";
+import { createTunnelService, isTunnelMessage } from "./lib/tunnels.ts";
 import { shapeListeners } from "./lib/shape.ts";
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, type Settings } from "./lib/settings.ts";
 import { badgeCount } from "./lib/view.ts";
@@ -47,10 +48,25 @@ chrome.alarms.onAlarm.addListener((a) => {
 // Changing badge groups or hiding a port updates the badge right away.
 onSettingsChanged(() => void refresh());
 
-// The popup refreshes every couple of seconds while open and tells us the count.
-chrome.runtime.onMessage.addListener((msg: unknown) => {
+// Share links outlive the popup, so the worker owns them (see lib/tunnels.ts).
+const tunnels = createTunnelService({
+  live: () => {
+    const transport = portTransport();
+    return { client: new HostClient(transport), close: () => transport.reset?.() };
+  },
+  once: host,
+});
+
+chrome.runtime.onMessage.addListener((msg: unknown, _sender, sendResponse) => {
+  // The popup refreshes every couple of seconds while open and tells us the count.
   if (msg && typeof msg === "object" && (msg as { type?: string }).type === "portlight:count") {
     const count = (msg as { count: number | null }).count;
     void setBadge(typeof count === "number" ? count : null);
+    return;
+  }
+  if (isTunnelMessage(msg)) {
+    const op = msg.op === "start" || msg.op === "stop" ? { op: msg.op, port: msg.port } : { op: msg.op };
+    void tunnels.handle(op as Parameters<typeof tunnels.handle>[0]).then(sendResponse);
+    return true; // answer asynchronously
   }
 });
