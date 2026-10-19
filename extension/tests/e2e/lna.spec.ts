@@ -52,7 +52,7 @@ for (const [mode, flags] of Object.entries(MODES)) {
       test.skip((await page.locator("#app").getAttribute("data-mode")) === "host", "a native host is installed for this profile");
 
       // The port is random, so it reaches the scan through the user's extra probe ports.
-      await page.evaluate((p) => chrome.storage.sync.set({ "portlight.settings": { version: 1, extraProbePorts: [p] } }), port);
+      await page.evaluate((p) => chrome.storage.local.set({ "portlight.settings": { version: 1, extraProbePorts: [p] } }), port);
       await page.reload();
       await page.getByRole("button", { name: "Scan common ports over HTTP" }).click();
       const row = page.locator(`li.row[data-key="${port}:http"]`);

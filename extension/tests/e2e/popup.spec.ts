@@ -366,7 +366,7 @@ test("settings: theme and editor apply, and react to changes from the options pa
   await expect(page.locator("#menu")).toContainText("Open in Zed");
   await page.keyboard.press("Escape");
   // Another surface (the options page) saves; the open popup follows.
-  await page.evaluate(() => (window as any).chrome.storage.sync.set({ "portlight.settings": { version: 1, theme: "light", editor: "none", groupRows: false } }));
+  await page.evaluate(() => (window as any).chrome.storage.local.set({ "portlight.settings": { version: 1, theme: "light", editor: "none", groupRows: false } }));
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await expect(page.locator(".section-label")).toHaveCount(0);
   await page.locator('li.row[data-key^="3000:"]').click({ button: "right" });

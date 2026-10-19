@@ -203,7 +203,7 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
       };
     },
   };
-  // chrome.storage.sync with change events, so the popup's settings round-trip like the real thing.
+  // chrome.storage (local + sync) with change events, so the popup's settings round-trip like the real thing.
   const store: Record<string, any> = settings ? { "portlight.settings": { version: 1, ...settings } } : {};
   const storageListeners: ((changes: any, area: string) => void)[] = [];
   (window as any).__store = store;
@@ -216,21 +216,26 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
   (window as any).__tabs = () => tabList;
   runtime.openOptionsPage = async () => void ((window as any).__optionsOpened += 1);
   const noopEvent = { addListener() {}, removeListener() {} };
+  function area(data: Record<string, any>, name: string) {
+    return {
+      get: async (key: string) => (key in data ? { [key]: structuredClone(data[key]) } : {}),
+      set: async (items: Record<string, any>) => {
+        const changes: any = {};
+        for (const [k, v] of Object.entries(items)) {
+          changes[k] = { oldValue: data[k], newValue: structuredClone(v) };
+          data[k] = structuredClone(v);
+        }
+        setTimeout(() => storageListeners.forEach((f) => f(changes, name)), 0);
+      },
+    };
+  }
   const chromeStub = {
     runtime,
     action: { setBadgeText: async (o: { text: string }) => void badges.push(o.text), setBadgeBackgroundColor: async () => {} },
     storage: {
-      sync: {
-        get: async (key: string) => (key in store ? { [key]: structuredClone(store[key]) } : {}),
-        set: async (items: Record<string, any>) => {
-          const changes: any = {};
-          for (const [k, v] of Object.entries(items)) {
-            changes[k] = { oldValue: store[k], newValue: structuredClone(v) };
-            store[k] = structuredClone(v);
-          }
-          setTimeout(() => storageListeners.forEach((f) => f(changes, "sync")), 0);
-        },
-      },
+      // Settings live in chrome.storage.local; sync is kept (empty) for the one-time migration read.
+      local: area(store, "local"),
+      sync: area({}, "sync"),
       onChanged: {
         addListener: (f: any) => storageListeners.push(f),
         removeListener: (f: any) => storageListeners.splice(storageListeners.indexOf(f), 1),
