@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DIST } from "./harness.ts";
 
-// The real unpacked build: the manifest's options page exists, opens, and saves to real chrome.storage.sync.
-test("the built extension opens its options page and saves to chrome.storage.sync", async () => {
+// The real unpacked build: the manifest's options page exists, opens, and saves to real chrome.storage.local.
+test("the built extension opens its options page and saves to chrome.storage.local", async () => {
   const manifest = JSON.parse(readFileSync(join(DIST, "manifest.json"), "utf8"));
   expect(manifest.options_ui).toEqual({ page: "options.html", open_in_tab: true });
 
@@ -31,7 +31,7 @@ test("the built extension opens its options page and saves to chrome.storage.syn
 
     await page.getByLabel("Open projects in").selectOption("cursor");
     await expect
-      .poll(() => worker.evaluate(async () => ((await chrome.storage.sync.get("portlight.settings"))["portlight.settings"] as { editor?: string } | undefined)?.editor))
+      .poll(() => worker.evaluate(async () => ((await chrome.storage.local.get("portlight.settings"))["portlight.settings"] as { editor?: string } | undefined)?.editor))
       .toBe("cursor");
     await page.reload();
     await expect(page.getByLabel("Open projects in")).toHaveValue("cursor");

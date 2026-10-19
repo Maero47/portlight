@@ -3,7 +3,7 @@
 
 import { HostClient, HostConnectionError, chromeTransport } from "../lib/host.ts";
 import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
-import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, saveSettings, type Settings } from "../lib/settings.ts";
+import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, saveSettings, writeSettings, type Settings } from "../lib/settings.ts";
 import { icon } from "../popup/icons.ts";
 import { WriteScheduler } from "./writer.ts";
 import {
@@ -57,9 +57,8 @@ function announce(text: string) {
 
 // ---------- saving ----------
 
-// Every write goes through one scheduler: edits are merged and storage.sync is written at most
-// once per MIN_WRITE_INTERVAL_MS, so no control can go past the sync write quota. The page
-// itself updates instantly; only the storage write is paced.
+// Every write goes through one scheduler: edits are merged and storage is written at most once
+// per MIN_WRITE_INTERVAL_MS. The page itself updates instantly; only the storage write is paced.
 let savedTimer: ReturnType<typeof setTimeout> | undefined;
 /** Bumped on every local edit, so a storage read that started earlier can tell it is stale. */
 let edits = 0;
@@ -112,9 +111,20 @@ function adopt(s: Settings, at = edits) {
 /** Nothing staged and nothing in flight: storage can be taken as the truth. */
 const idle = () => !writer.busy();
 
-// Don't lose a staged edit when the tab closes or hides.
-addEventListener("pagehide", () => void writer.flush());
-document.addEventListener("visibilitychange", () => document.hidden && void writer.flush());
+/**
+ * The tab is closing or hiding. saveSettings() reads before it writes, and a closing page is
+ * torn down before that read returns, so a waiting edit would be lost. Write the page's full
+ * merged settings with one storage call issued right here instead. The scheduler keeps its
+ * edits too: if the page lives on (it was only hidden), its normal read-merge save follows and
+ * lands after any older save still in flight, so nothing is rolled back.
+ */
+function persistNow() {
+  if (!writer.busy()) return;
+  void writeSettings(settings).catch((e) => console.warn("Portlight: could not save settings", e));
+  void writer.flush();
+}
+addEventListener("pagehide", persistNow);
+document.addEventListener("visibilitychange", () => document.hidden && persistNow());
 
 function showSaved() {
   const el = $("saved");

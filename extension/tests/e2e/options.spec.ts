@@ -4,7 +4,7 @@ import { extname, resolve } from "node:path";
 import { DEFAULT_SETTINGS, type Settings } from "../../src/lib/settings.ts";
 import { DIST, ORIGIN, PINNED_ID, SHOTS } from "./harness.ts";
 
-// The options page against a mocked chrome.storage.sync and native host.
+// The options page against a mocked chrome.storage (local, plus sync for migration) and native host.
 mkdirSync(SHOTS, { recursive: true });
 const shot = (name: string) => resolve(SHOTS, `${name}.png`);
 const KEY = "portlight.settings";
@@ -14,8 +14,11 @@ test.use({ viewport: { width: 720, height: 900 } });
 
 type Host = "connected" | "missing" | "forbidden";
 
-async function openOptions(page: Page, opts: { scheme?: "light" | "dark"; host?: Host; stored?: unknown } = {}) {
-  const { scheme = "light", host = "connected", stored } = opts;
+async function openOptions(
+  page: Page,
+  opts: { scheme?: "light" | "dark"; host?: Host; stored?: unknown; storedSync?: unknown } = {},
+) {
+  const { scheme = "light", host = "connected", stored, storedSync } = opts;
   const errors: string[] = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -25,19 +28,23 @@ async function openOptions(page: Page, opts: { scheme?: "light" | "dark"; host?:
     return route.fulfill({ status: 200, body: readFileSync(file), contentType: TYPES[extname(file)] ?? "application/octet-stream" });
   });
   await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
-  await page.addInitScript(mockChrome, { host, stored: stored ?? null, id: PINNED_ID, key: KEY });
+  await page.addInitScript(mockChrome, { host, stored: stored ?? null, storedSync: storedSync ?? null, id: PINNED_ID, key: KEY });
   await page.goto(`${ORIGIN}/options.html`);
   await expect(page.locator("#page")).toHaveAttribute("aria-busy", "false");
   return { errors };
 }
 
 /** Runs in the page. Keep it self-contained. */
-function mockChrome({ host, stored, id, key }: { host: Host; stored: unknown; id: string; key: string }) {
+function mockChrome({ host, stored, storedSync, id, key }: { host: Host; stored: unknown; storedSync: unknown; id: string; key: string }) {
   const area: Record<string, unknown> = stored ? { [key]: stored } : {};
+  const syncData: Record<string, unknown> = storedSync ? { [key]: storedSync } : {};
   const listeners: ((c: any, a: string) => void)[] = [];
   const w = window as any;
   w.__store = area;
   w.__writes = 0;
+  w.__syncStore = syncData;
+  /** Every storage call in order, e.g. "local.get", "local.set". */
+  w.__ops = [];
   w.__writeTimes = [];
   const failure =
     host === "missing"
@@ -62,26 +69,35 @@ function mockChrome({ host, stored, id, key }: { host: Host; stored: unknown; id
     },
   };
   const clone = (v: unknown) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
-  const sync = {
+  const makeArea = (name: "local" | "sync", data: Record<string, unknown>) => ({
     async get(k: string) {
-      return k in area ? { [k]: clone(area[k]) } : {};
+      w.__ops.push(`${name}.get`);
+      return k in data ? { [k]: clone(data[k]) } : {};
     },
+    // The data changes synchronously, as the real call is issued before the promise returns.
     async set(items: Record<string, unknown>) {
+      w.__ops.push(`${name}.set`);
       const changes: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(items)) {
-        changes[k] = { oldValue: clone(area[k]), newValue: clone(v) };
-        area[k] = clone(v);
+        changes[k] = { oldValue: clone(data[k]), newValue: clone(v) };
+        data[k] = clone(v);
       }
-      w.__writes++;
-      w.__writeTimes.push(performance.now());
-      setTimeout(() => listeners.forEach((f) => f(changes, "sync")), 0);
+      if (name === "local") {
+        w.__writes++;
+        w.__writeTimes.push(performance.now());
+      }
+      setTimeout(() => listeners.forEach((f) => f(changes, name)), 0);
     },
-  };
+  });
+  const local = makeArea("local", area);
+  const sync = makeArea("sync", syncData);
   // Lets a test play "another tab changed a setting".
-  w.__externalSet = (v: unknown) => sync.set({ [key]: v });
+  w.__externalSet = (v: unknown) => local.set({ [key]: v });
+  w.__externalSyncSet = (v: unknown) => sync.set({ [key]: v });
   const chromeStub = {
     runtime,
     storage: {
+      local,
       sync,
       onChanged: {
         addListener: (f: any) => listeners.push(f),
@@ -127,7 +143,7 @@ test("helper for another ID asks for a reinstall", async ({ page }) => {
   await expect(page.locator("#install-text")).toContainText("different extension ID");
 });
 
-test("every setting round-trips through chrome.storage.sync", async ({ page, browser }) => {
+test("every setting round-trips through chrome.storage.local", async ({ page, browser }) => {
   const { errors } = await openOptions(page);
   expect(await stored(page)).toBeUndefined();
 
@@ -274,12 +290,12 @@ test("keyboard can remove any port, not just the last", async ({ page }) => {
 /** Storage write times in the page, to check the pace of writes. */
 const writeTimes = (page: Page) => page.evaluate(() => (window as any).__writeTimes as number[]);
 function expectPaced(times: number[]) {
-  // The scheduler starts a write at most every 600 ms; storage.set lands a read later, so allow
-  // some jitter. Anything ≥ 500 ms apart is at most 120 a minute, the chrome.storage.sync cap.
-  for (let i = 1; i < times.length; i++) expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(500);
+  // The scheduler starts a write at most every 250 ms; storage.set lands a read later, so allow
+  // some jitter.
+  for (let i = 1; i < times.length; i++) expect(times[i]! - times[i - 1]!).toBeGreaterThanOrEqual(200);
 }
 
-test("200 rapid edits across mixed controls stay well under the sync write quota", async ({ page }) => {
+test("200 rapid edits across mixed controls become a few paced writes", async ({ page }) => {
   const seeded = Array.from({ length: 40 }, (_, i) => 5000 + i);
   await openOptions(page, { stored: { ...DEFAULT_SETTINGS, hiddenPorts: seeded } });
   const t0 = await page.evaluate(() => performance.now());
@@ -308,9 +324,10 @@ test("200 rapid edits across mixed controls stay well under the sync write quota
   const times = await writeTimes(page);
   const elapsed = times.at(-1)! - t0;
   expectPaced(times);
-  // 200 edits became a handful of writes; even sustained this pace is ≤ 100 a minute.
-  expect(times.length).toBeLessThanOrEqual(Math.floor(elapsed / 600) + 2);
-  expect((times.length / Math.max(elapsed, 60_000)) * 60_000).toBeLessThan(120);
+  // 200 edits became a handful of writes, all to storage.local.
+  expect(times.length).toBeLessThanOrEqual(Math.floor(elapsed / 250) + 2);
+  expect(times.length).toBeLessThan(20);
+  expect(await page.evaluate(() => (window as any).__ops.filter((o: string) => o.startsWith("sync.set")))).toEqual([]);
   console.log(`200 edits → ${times.length} writes over ${Math.round(elapsed)} ms`);
 });
 
@@ -327,19 +344,61 @@ test("holding a key writes at a steady pace with the final value", async ({ page
 test("a single change is written at once", async ({ page }) => {
   await openOptions(page);
   await page.getByRole("switch", { name: /Group by category/ }).click();
-  // Well under the 600 ms interval: the first edit after a quiet spell isn't delayed.
-  await expect.poll(async () => (await stored(page))?.groupRows, { timeout: 250 }).toBe(false);
+  // Under the 250 ms interval: the first edit after a quiet spell isn't delayed.
+  await expect.poll(async () => (await stored(page))?.groupRows, { timeout: 150 }).toBe(false);
 });
 
-test("a waiting edit is written when the page hides", async ({ page }) => {
+test("closing the tab writes waiting edits synchronously, without reading first", async ({ page }) => {
   await openOptions(page);
-  await page.getByRole("spinbutton", { name: "Mark as idle after" }).focus();
-  await page.keyboard.press("ArrowDown"); // written at once: 7
-  await expectStored(page, { idleAfterHours: 7 });
-  await page.keyboard.press("ArrowDown"); // waits for the interval: 6
-  await page.evaluate(() => dispatchEvent(new PageTransitionEvent("pagehide")));
-  // Under the 600 ms interval, so only the pagehide flush can have written it.
-  await expect.poll(async () => (await stored(page))?.idleAfterHours, { timeout: 250 }).toBe(6);
+  // All in one synchronous turn, as when a tab closes: two steps (one written, one waiting),
+  // then pagehide. Whatever is in storage when the handler returns is all a closing page gets.
+  const result = await page.evaluate((key) => {
+    const w = window as any;
+    const spin = document.querySelector<HTMLElement>(".stepper-arrows")!;
+    const step = () => spin.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    step(); // 7
+    step(); // 6
+    const before = w.__ops.length;
+    dispatchEvent(new PageTransitionEvent("pagehide"));
+    return { ops: w.__ops.slice(before), idle: w.__store[key]?.idleAfterHours };
+  }, KEY);
+  expect(result).toEqual({ ops: ["local.set"], idle: 6 });
+  // If the page lives on, the save that was already in flight doesn't roll it back.
+  await page.waitForTimeout(600);
+  expect((await stored(page))?.idleAfterHours).toBe(6);
+  await expect(page.locator("#idle-value")).toHaveText("6 hours");
+});
+
+test("hiding the tab with nothing waiting writes nothing", async ({ page }) => {
+  await openOptions(page);
+  const ops = await page.evaluate(() => {
+    const w = window as any;
+    const before = w.__ops.length;
+    dispatchEvent(new PageTransitionEvent("pagehide"));
+    return w.__ops.slice(before);
+  });
+  expect(ops).toEqual([]);
+});
+
+test("settings saved by an older build in sync are moved to local", async ({ page }) => {
+  const old = { ...DEFAULT_SETTINGS, theme: "dark", editor: "zed", hiddenPorts: [5000] };
+  const { errors } = await openOptions(page, { storedSync: old });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByLabel("Open projects in")).toHaveValue("zed");
+  await expect.poll(() => stored(page)).toEqual(old);
+  // Later edits go to local only; the sync copy is left as it was.
+  await page.getByLabel("Open projects in").selectOption("cursor");
+  await expectStored(page, { editor: "cursor" });
+  expect(await page.evaluate((k) => (window as any).__syncStore[k].editor, KEY)).toBe("zed");
+  expect(errors).toEqual([]);
+});
+
+test("only changes in the local area reach the page", async ({ page }) => {
+  await openOptions(page);
+  await page.evaluate((v) => (window as any).__externalSyncSet(v), { ...DEFAULT_SETTINGS, editor: "zed" });
+  await page.evaluate((v) => (window as any).__externalSet(v), { ...DEFAULT_SETTINGS, theme: "dark" });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByLabel("Open projects in")).toHaveValue("vscode");
 });
 
 test("the popup can later set a value this page wrote before", async ({ page }) => {

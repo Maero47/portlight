@@ -1,13 +1,13 @@
 // One gate for every settings write from the options page.
 //
-// chrome.storage.sync allows 120 writes a minute (MAX_WRITE_OPERATIONS_PER_MINUTE). Controls
-// can fire far faster than that (held arrow keys, key repeat on Backspace, radio groups that
-// wrap), so edits are merged here and written at most once per `minIntervalMs`:
-// the first edit after a quiet spell is written at once, later ones are merged into one
-// trailing write. Only one write is ever in flight. With the default interval no control,
-// present or future, can go past the quota.
+// Settings live in chrome.storage.local, which has no write-rate quota, so this is not about
+// limits any more. It keeps storage calm: controls can fire far faster than anyone needs to
+// persist (held arrow keys, key repeat on Backspace, radio groups that wrap), and every write
+// wakes each open surface's onChanged listener. Edits are merged here: the first edit after a
+// quiet spell is written at once, later ones are merged into one trailing write at most every
+// `minIntervalMs`, and only one write is ever in flight.
 
-export const MIN_WRITE_INTERVAL_MS = 600; // ≤ 100 writes a minute, under the 120 cap
+export const MIN_WRITE_INTERVAL_MS = 250;
 
 export interface WriterOptions {
   minIntervalMs?: number;
@@ -40,7 +40,7 @@ export class WriteScheduler<P extends object> {
     this.pump();
   }
 
-  /** Write anything staged right away, ignoring the interval (page hiding or closing). */
+  /** Start writing anything staged right away, ignoring the interval. */
   flush(): Promise<void> {
     this.forced = true;
     this.pump();

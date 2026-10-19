@@ -1,12 +1,10 @@
 // Pure logic behind the options page controls. No DOM, so it is unit-tested directly.
 
-import { clamp, isPort, MAX_IDLE_HOURS, MAX_PORT, MIN_PORT, type Editor, type Group } from "../lib/settings.ts";
+import { clamp, isPort, MAX_IDLE_HOURS, MAX_LIST, MAX_NAME, MAX_PORT, MIN_PORT, type Editor, type Group } from "../lib/settings.ts";
 
-export { clamp, isPort, MAX_PORT, MIN_PORT };
+export { clamp, isPort, MAX_LIST, MAX_PORT, MIN_PORT };
 /** A range like "3000-3010" may add at most this many ports at once. */
 export const MAX_RANGE = 100;
-/** chrome.storage.sync caps one item at 8 KB; this keeps a port list far below it. */
-export const MAX_LIST = 200;
 
 export interface PortParse {
   ports: number[];
@@ -72,7 +70,7 @@ export function removePort(current: readonly number[], port: number): number[] {
 export function cleanProcessName(input: string): string | null {
   const name = input.trim().replace(/\s+/g, " ");
   if (!name) return null;
-  return name.slice(0, 64);
+  return name.slice(0, MAX_NAME);
 }
 
 /** Add a process name, case-insensitively unique, keeping the user's spelling and order. */

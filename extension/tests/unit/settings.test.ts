@@ -75,3 +75,115 @@ describe("isPort / clamp", () => {
     expect(clamp(NaN, 0, 3)).toBe(0);
   });
 });
+
+// ---------- storage ----------
+
+import { afterEach, vi } from "vitest";
+import { loadSettings, onSettingsChanged, saveSettings, writeSettings } from "../../src/lib/settings.ts";
+
+const KEY = "portlight.settings";
+type Listener = (changes: Record<string, { newValue?: unknown }>, area: string) => void;
+
+function fakeChrome(opts: { local?: unknown; sync?: unknown; syncGetThrows?: boolean; localSetRejects?: boolean; noSync?: boolean } = {}) {
+  const ops: string[] = [];
+  const data = { local: {} as Record<string, unknown>, sync: {} as Record<string, unknown> };
+  if (opts.local !== undefined) data.local[KEY] = opts.local;
+  if (opts.sync !== undefined) data.sync[KEY] = opts.sync;
+  const listeners: Listener[] = [];
+  const area = (name: "local" | "sync") => ({
+    get: vi.fn(async (k: string) => {
+      ops.push(`${name}.get`);
+      if (name === "sync" && opts.syncGetThrows) throw new Error("sync unavailable");
+      return k in data[name] ? { [k]: data[name][k] } : {};
+    }),
+    // Records synchronously, like the real API issues the call before returning a promise.
+    set: vi.fn((items: Record<string, unknown>) => {
+      ops.push(`${name}.set`);
+      if (name === "local" && opts.localSetRejects) return Promise.reject(new Error("quota"));
+      Object.assign(data[name], items);
+      return Promise.resolve();
+    }),
+  });
+  const storage: any = {
+    local: area("local"),
+    sync: opts.noSync ? undefined : area("sync"),
+    onChanged: {
+      addListener: (f: Listener) => listeners.push(f),
+      removeListener: (f: Listener) => listeners.splice(listeners.indexOf(f), 1),
+    },
+  };
+  vi.stubGlobal("chrome", { storage });
+  const emit = (areaName: string, value: unknown) => listeners.forEach((f) => f({ [KEY]: { newValue: value } }, areaName));
+  return { ops, data, emit, listeners };
+}
+
+describe("settings storage", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads from chrome.storage.local", async () => {
+    const { ops } = fakeChrome({ local: { ...DEFAULT_SETTINGS, theme: "dark" }, sync: { theme: "light" } });
+    expect((await loadSettings()).theme).toBe("dark");
+    expect(ops).toEqual(["local.get"]);
+  });
+
+  it("moves settings from sync to local once, leaving sync alone", async () => {
+    const { ops, data } = fakeChrome({ sync: { theme: "light", hiddenPorts: [5000, -1] } });
+    const s = await loadSettings();
+    expect(s.theme).toBe("light");
+    expect(s.hiddenPorts).toEqual([5000]);
+    expect(data.local[KEY]).toEqual(s);
+    expect(data.sync[KEY]).toEqual({ theme: "light", hiddenPorts: [5000, -1] });
+    ops.length = 0;
+    await loadSettings();
+    expect(ops).toEqual(["local.get"]);
+  });
+
+  it("migration is best effort", async () => {
+    fakeChrome({ syncGetThrows: true });
+    expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
+    fakeChrome({ noSync: true });
+    expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
+    fakeChrome({ sync: { editor: "zed" }, localSetRejects: true });
+    expect((await loadSettings()).editor).toBe("zed");
+    fakeChrome();
+    expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("saveSettings merges into local and never touches sync", async () => {
+    const { ops, data } = fakeChrome({ local: { ...DEFAULT_SETTINGS, editor: "zed" } });
+    const s = await saveSettings({ theme: "dark" });
+    expect(s).toMatchObject({ editor: "zed", theme: "dark" });
+    expect(data.local[KEY]).toEqual(s);
+    expect(ops).toEqual(["local.get", "local.set"]);
+  });
+
+  it("writeSettings issues one local set synchronously, without reading", () => {
+    const { ops, data } = fakeChrome({ local: { ...DEFAULT_SETTINGS } });
+    const p = writeSettings({ ...DEFAULT_SETTINGS, idleAfterHours: 900 });
+    // Nothing awaited yet: the call has already gone out.
+    expect(ops).toEqual(["local.set"]);
+    expect((data.local[KEY] as { idleAfterHours: number }).idleAfterHours).toBe(72); // normalized
+    return p;
+  });
+
+  it("onSettingsChanged follows the local area only", () => {
+    const { emit, listeners } = fakeChrome();
+    const seen: string[] = [];
+    const off = onSettingsChanged((s) => seen.push(s.theme));
+    emit("sync", { theme: "dark" });
+    emit("local", { theme: "light" });
+    expect(seen).toEqual(["light"]);
+    off();
+    expect(listeners).toHaveLength(0);
+  });
+
+  it("caps list lengths and app names", () => {
+    const s = normalizeSettings({
+      hiddenPorts: Array.from({ length: 500 }, (_, i) => i + 1),
+      hiddenProcesses: Array.from({ length: 500 }, (_, i) => `app-${i}-${"x".repeat(100)}`),
+    });
+    expect(s.hiddenPorts).toHaveLength(200);
+    expect(s.hiddenProcesses).toHaveLength(200);
+    expect(s.hiddenProcesses[0]).toHaveLength(64);
+  });
+});

@@ -59,7 +59,7 @@ describe("port lists", () => {
     expect(mergePorts([8080, 3000], [5173, 3000, 0, 70000, 1.5])).toEqual([3000, 5173, 8080]);
   });
 
-  it("caps the list so chrome.storage.sync stays far below its item limit", () => {
+  it("caps the list length", () => {
     const many = Array.from({ length: MAX_LIST + 50 }, (_, i) => i + 1);
     expect(mergePorts([], many)).toHaveLength(MAX_LIST);
   });

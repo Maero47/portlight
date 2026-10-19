@@ -37,7 +37,7 @@ describe("WriteScheduler", () => {
     expect(writes[1]!.at).toBe(MIN_WRITE_INTERVAL_MS);
   });
 
-  it("never writes more than 100 times a minute, however fast edits come", async () => {
+  it("never writes more often than the interval allows, however fast edits come", async () => {
     const { w, writes } = setup({ latency: 30 });
     // An edit every 10 ms for two minutes: 12 000 edits.
     for (let t = 0; t < 120_000; t += 10) {
@@ -47,7 +47,8 @@ describe("WriteScheduler", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     for (let i = 1; i < writes.length; i++) expect(writes[i]!.at - writes[i - 1]!.at).toBeGreaterThanOrEqual(MIN_WRITE_INTERVAL_MS);
     const perMinute = writes.filter((x) => x.at < 60_000).length;
-    expect(perMinute).toBeLessThanOrEqual(100);
+    expect(perMinute).toBeLessThanOrEqual(Math.ceil(60_000 / MIN_WRITE_INTERVAL_MS));
+    expect(perMinute).toBeLessThan(6_000 / 20); // 6 000 edits a minute become a small fraction of writes
     expect(writes.at(-1)!.patch).toEqual({ v: 119_990 });
   });
 
