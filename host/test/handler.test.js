@@ -5,7 +5,7 @@ import { createHandler, sameUser } from "../src/handler.js";
 const L = (o) => ({ address: "127.0.0.1", family: "IPv4", process: "node", command: "node x", cwd: "/p", user: "me", startedAt: null, ...o });
 
 function setup(listeners, extra = {}) {
-  const calls = { scan: 0, signal: [], probe: [] };
+  const calls = { scan: 0, signal: [], probe: [], launch: [] };
   const handle = createHandler({
     platform: "testos",
     user: "me",
@@ -27,6 +27,13 @@ function setup(listeners, extra = {}) {
       calls.signal.push([pid, sig]);
     },
     isMine: async (l) => ({ mine: l.user === "me", owner: l.user }),
+    containers: async () => [],
+    processPairs: async () => [],
+    isDirectory: async (p) => p.startsWith("/"),
+    launch: async (file, args) => {
+      calls.launch.push([file, ...args]);
+    },
+    editorCommand: (id, dir) => (id === "zed" ? null : { file: `/bin/${id}`, args: [dir] }),
     ...extra.deps,
   });
   return { handle, calls };
@@ -83,7 +90,7 @@ test("suggest skips busy, unsafe and well-known ports, nearest first", async () 
 
 test("kill signals only listeners owned by the current user", async () => {
   const { handle, calls } = setup([L({ port: 3000, pid: 10 }), L({ port: 80, pid: 20, user: "root" }), L({ port: 81, pid: 30, user: null })]);
-  assert.deepEqual(await handle({ id: "k", type: "kill", pid: 10 }), { id: "k", ok: true, type: "kill", pid: 10 });
+  assert.deepEqual(await handle({ id: "k", type: "kill", pid: 10 }), { id: "k", ok: true, type: "kill", pid: 10, killed: [10] });
   assert.deepEqual(calls.signal, [[10, "SIGTERM"]]);
   await handle({ id: "k2", type: "kill", pid: 10, signal: "KILL" });
   assert.deepEqual(calls.signal[1], [10, "SIGKILL"]);
@@ -128,4 +135,106 @@ test("malformed requests get bad_request; scan failures get internal", async () 
   assert.equal((await handle({ id: "x", type: "toString" })).error.code, "bad_request");
   const boom = createHandler({ scan: async () => { throw new Error("lsof exploded"); } });
   assert.deepEqual(await boom({ id: "b", type: "list" }), { id: "b", ok: false, error: { code: "internal", message: "lsof exploded" } });
+});
+
+test("kill with tree also signals descendants, skipping protected and other users' pids", async () => {
+  // 10 (listener) -> 11 -> 12 ; 10 -> 13 (root-owned) ; 10 -> 1 (protected) ; 99 unrelated
+  const pairs = [[10, 5], [11, 10], [12, 11], [13, 10], [1, 10], [99, 5]];
+  const { handle, calls } = setup([L({ port: 3000, pid: 10 })], {
+    deps: {
+      processPairs: async () => pairs,
+      isMine: async (l) => ({ mine: l.pid !== 13 && (l.user ?? "me") === "me", owner: l.pid === 13 ? "root" : "me" }),
+    },
+  });
+  const r = await handle({ id: "t", type: "kill", pid: 10, tree: true });
+  assert.deepEqual(r, { id: "t", ok: true, type: "kill", pid: 10, killed: [10, 11, 12] });
+  assert.deepEqual(calls.signal, [[10, "SIGTERM"], [11, "SIGTERM"], [12, "SIGTERM"]], "parent first, then children");
+
+  const n = await handle({ id: "t2", type: "kill", pid: 10, signal: "KILL" });
+  assert.deepEqual(n.killed, [10], "no tree unless asked");
+  assert.equal((await handle({ id: "t3", type: "kill", pid: 10, tree: "yes" })).error.code, "bad_request");
+});
+
+test("kill with tree: a child that already exited is skipped, not an error", async () => {
+  const signalled = [];
+  const { handle } = setup([L({ port: 3000, pid: 10 })], {
+    deps: {
+      processPairs: async () => [[11, 10], [12, 10]],
+      isMine: async () => ({ mine: true }),
+      signal: (pid) => {
+        if (pid === 11) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        signalled.push(pid);
+      },
+    },
+  });
+  const r = await handle({ id: "x", type: "kill", pid: 10, tree: true });
+  assert.deepEqual(r.killed, [10, 12]);
+  assert.deepEqual(signalled, [10, 12]);
+});
+
+test("kill refuses container engine forwarders (it would stop every container)", async () => {
+  const published = [{ hostIp: "0.0.0.0", hostPort: 5433, container: { id: "abc", name: "shop-postgres-1", image: "postgres:16", project: "shop", containerPort: 5432 } }];
+  const { handle, calls } = setup([L({ port: 5433, pid: 40, process: "com.docker.backend" })], { deps: { containers: async () => published } });
+  const r = await handle({ id: "d", type: "kill", pid: 40 });
+  assert.equal(r.error.code, "not_permitted");
+  assert.match(r.error.message, /forwards ports for containers/);
+  assert.deepEqual(calls.signal, []);
+});
+
+test("list and check carry container info from the engine", async () => {
+  const published = [{ hostIp: "0.0.0.0", hostPort: 5433, container: { id: "abc", name: "shop-postgres-1", image: "postgres:16", project: "shop", containerPort: 5432 } }];
+  const { handle } = setup([L({ port: 5433, pid: 40, process: "OrbStack Helper" }), L({ port: 3000, pid: 10 })], {
+    deps: { containers: async () => published },
+  });
+  const r = await handle({ id: "l", type: "list" });
+  assert.equal(r.listeners.find((l) => l.port === 5433).container.name, "shop-postgres-1");
+  assert.equal(r.listeners.find((l) => l.port === 3000).container, null);
+  const c = await handle({ id: "c", type: "check", ports: [5433] });
+  assert.equal(c.results[0].listener.container.project, "shop");
+});
+
+test("a failing container engine never breaks list", async () => {
+  const { handle } = setup([L({ port: 3000, pid: 10 })], { deps: { containers: async () => { throw new Error("docker hung"); } } });
+  const r = await handle({ id: "l", type: "list" });
+  assert.equal(r.ok, true);
+  assert.equal(r.listeners.length, 1);
+});
+
+test("reveal opens the cwd of an owned listener; refuses others", async () => {
+  const { handle, calls } = setup(
+    [L({ port: 3000, pid: 10, cwd: "/Users/me/app" }), L({ port: 80, pid: 20, user: "root" }), L({ port: 81, pid: 30, cwd: null }), L({ port: 82, pid: 31, cwd: "/gone" }), L({ port: 5433, pid: 40, process: "vpnkit", cwd: "/" })],
+    { deps: { isDirectory: async (p) => p !== "/gone" } },
+  );
+  assert.deepEqual(await handle({ id: "r", type: "reveal", pid: 10 }), { id: "r", ok: true, type: "reveal", path: "/Users/me/app" });
+  assert.equal(calls.launch.length, 1);
+  assert.equal(calls.launch[0].at(-1), "/Users/me/app");
+  assert.equal((await handle({ id: "r2", type: "reveal", pid: 20 })).error.code, "not_permitted");
+  assert.equal((await handle({ id: "r3", type: "reveal", pid: 99 })).error.code, "not_found");
+  assert.equal((await handle({ id: "r4", type: "reveal", pid: 30 })).error.code, "not_found");
+  assert.equal((await handle({ id: "r5", type: "reveal", pid: 31 })).error.code, "not_found");
+  assert.equal((await handle({ id: "r6", type: "reveal", pid: 40 })).error.code, "not_permitted");
+  assert.equal((await handle({ id: "r7", type: "reveal", pid: "10" })).error.code, "bad_request");
+  assert.equal(calls.launch.length, 1, "nothing else launched");
+});
+
+test("reveal reports a missing file manager as not_found", async () => {
+  const { handle } = setup([L({ port: 3000, pid: 10 })], {
+    deps: { launch: async () => { const e = new Error("spawn xdg-open ENOENT"); e.code = "ENOENT"; throw e; } },
+  });
+  const r = await handle({ id: "r", type: "reveal", pid: 10 });
+  assert.equal(r.error.code, "not_found");
+});
+
+test("openEditor: whitelisted ids only, argv without a shell, clear not_found", async () => {
+  const { handle, calls } = setup([L({ port: 3000, pid: 10, cwd: "/Users/me/app" }), L({ port: 80, pid: 20, user: "root" })]);
+  assert.deepEqual(await handle({ id: "e", type: "openEditor", pid: 10, editor: "vscode" }), { id: "e", ok: true, type: "openEditor", path: "/Users/me/app" });
+  assert.deepEqual(calls.launch, [["/bin/vscode", "/Users/me/app"]]);
+  const missing = await handle({ id: "e2", type: "openEditor", pid: 10, editor: "zed" });
+  assert.equal(missing.error.code, "not_found");
+  assert.match(missing.error.message, /Zed is not installed/);
+  for (const editor of [undefined, "vim", "toString", "code && rm -rf ~", 5]) {
+    assert.equal((await handle({ id: "e3", type: "openEditor", pid: 10, editor })).error.code, "bad_request", String(editor));
+  }
+  assert.equal((await handle({ id: "e4", type: "openEditor", pid: 20, editor: "vscode" })).error.code, "not_permitted");
+  assert.equal(calls.launch.length, 1);
 });

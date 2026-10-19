@@ -1,0 +1,26 @@
+[
+  {
+    "AutoRemove": false,
+    "Command": ["redis-server"],
+    "Created": 1760000000,
+    "Exited": false,
+    "Id": "0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e",
+    "Image": "docker.io/library/redis:7-alpine",
+    "Labels": { "io.podman.compose.project": "cache", "com.docker.compose.project": "cache" },
+    "Names": ["cache_redis_1"],
+    "Ports": [
+      { "host_ip": "", "container_port": 6379, "host_port": 16379, "range": 1, "protocol": "tcp" },
+      { "host_ip": "127.0.0.1", "container_port": 7000, "host_port": 17000, "range": 3, "protocol": "tcp" },
+      { "host_ip": "", "container_port": 53, "host_port": 1053, "range": 1, "protocol": "udp" }
+    ],
+    "State": "running"
+  },
+  {
+    "Id": "deadbeefcafe0000000000000000000000000000000000000000000000000000",
+    "Image": "quay.io/x/y:latest",
+    "Labels": null,
+    "Names": ["stopped"],
+    "Ports": null,
+    "State": "exited"
+  }
+]

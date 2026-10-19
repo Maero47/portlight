@@ -75,7 +75,20 @@ with `--enable-logging=stderr`.
 | `list`    | every TCP listener with pid, process, command line, cwd, user, start time            |
 | `check`   | `free` per port (max 1000), with the owning listener when known                      |
 | `suggest` | `count` (default 5, max 50) free ports nearest `near` (default 3000), ≥ 1024, skipping Chrome's blocked ports and common service ports (Postgres, Redis, AirPlay 5000/7000, …) |
-| `kill`    | sends TERM (default) or KILL, only to a pid that owns a listening port right now and runs as the current user (same uid on macOS/Linux, `tasklist /V` owner on Windows). Refuses the host itself and every process above it (launcher shell, browser) |
+| `kill`    | sends TERM (default) or KILL, only to a pid that owns a listening port right now and runs as the current user (same uid on macOS/Linux, `tasklist /V` owner on Windows). Refuses the host itself and every process above it (launcher shell, browser), and container engine forwarders. With `tree: true` it also signals the pid's descendants (parent first; same user, never protected pids) and returns every pid it signalled in `killed` |
+| `reveal`  | opens the listener's working directory in Finder (`open`), the file manager (`xdg-open`) or Explorer. Same ownership rules as `kill` |
+| `openEditor` | opens the working directory in `vscode`, `cursor`, `zed`, `webstorm` or `sublime` (fixed list). macOS uses the app bundle (`open -a`), otherwise the editor's CLI; Windows only real `.exe` files. `not_found` when the editor isn't installed |
+
+### Containers
+
+When a port is published by a running container (Docker Desktop, OrbStack, Colima/Lima,
+Podman, Linux `docker-proxy`), `list`/`check` add `container` {id, name, image, compose
+`project`, `containerPort`, compose `workingDir`} to that listener. The host asks
+`docker ps` / `podman ps` (found on PATH or in Homebrew, Docker, OrbStack and Rancher
+locations, since browsers start hosts with a minimal PATH) with a 1 s timeout, caches the
+answer for 3 s (15 s after a failure), and never fails a scan because of it. Published ports
+with no visible listener (root-owned or iptables-only) still show up, owner-less, when a
+probe confirms they answer. The forwarder's own `cwd` is reported as `null`: it is not a project.
 
 ## Tests
 
@@ -83,6 +96,6 @@ with `--enable-logging=stderr`.
 npm test
 ```
 
-Parsers are tested against captured `lsof`/`ss`/`/proc`/`netstat`/`tasklist` output in
-`test/fixtures`. The integration tests start a real TCP server and a real host
+Parsers are tested against captured `lsof`/`ss`/`/proc`/`netstat`/`tasklist`/`docker ps`/`podman ps`
+output in `test/fixtures`; reveal/editor argv building is tested without launching anything. The integration tests start a real TCP server and a real host
 process (macOS/Linux), and run the installer against a temporary `HOME`.

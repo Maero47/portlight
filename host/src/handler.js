@@ -1,6 +1,10 @@
 // Request validation and dispatch. All OS access goes through `deps` so it can be faked in tests.
 import os from "node:os";
-import { scanListeners, windowsProcessUser, processUid, ancestorPids } from "./scan.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { scanListeners, windowsProcessUser, processUid, ancestorPids, processPairs, descendantPids } from "./scan.js";
+import { createContainerSource, attachContainers, isContainerEngine } from "./containers.js";
+import { EDITORS, EDITOR_IDS, editorCommand, revealCommand, launchDetached } from "./launch.js";
 import { probePort, suggestPorts, isValidPort } from "./ports.js";
 import { PROTOCOL_VERSION, HOST_VERSION } from "./protocol.js";
 
@@ -57,6 +61,11 @@ export function defaultDeps() {
   return {
     platform: process.platform,
     scan: () => scanListeners(),
+    containers: createContainerSource(),
+    processPairs: () => processPairs(),
+    launch: (file, args) => launchDetached(file, args),
+    isDirectory: async (p) => (await fs.stat(p).catch(() => null))?.isDirectory() ?? false,
+    editorCommand: (id, dir) => editorCommand(id, dir),
     probe: (port) => probePort(port),
     signal: (pid, sig) => process.kill(pid, sig),
     user: me.name,
@@ -87,6 +96,17 @@ function bestListener(list) {
 export function createHandler(overrides = {}) {
   const deps = { ...defaultDeps(), ...overrides };
 
+  // OS scan and container lookup run side by side; a broken engine CLI never fails a scan.
+  async function scanWithContainers() {
+    const [listeners, published] = await Promise.all([
+      deps.scan(),
+      Promise.resolve()
+        .then(() => (deps.containers ? deps.containers() : []))
+        .catch(() => []),
+    ]);
+    return attachContainers(listeners, published, deps.probe);
+  }
+
   // Share one scan between requests that arrive close together (popup opens -> list + check).
   let cache = null;
   function scan() {
@@ -94,7 +114,7 @@ export function createHandler(overrides = {}) {
     if (cache && (cache.pending || now - cache.at < SCAN_CACHE_MS)) return cache.promise;
     const entry = { at: now, pending: true, promise: null };
     entry.promise = Promise.resolve()
-      .then(() => deps.scan())
+      .then(scanWithContainers)
       .finally(() => {
         entry.pending = false;
         entry.at = Date.now();
@@ -151,29 +171,100 @@ export function createHandler(overrides = {}) {
     async kill(req) {
       const { pid } = req;
       const signal = req.signal ?? "TERM";
-      if (!Number.isInteger(pid) || pid <= 0) fail("bad_request", "`pid` must be a positive integer");
       if (signal !== "TERM" && signal !== "KILL") fail("bad_request", "`signal` must be TERM or KILL");
-      const prot = typeof deps.protectedPids === "function" ? await deps.protectedPids() : deps.protectedPids;
-      if (prot.has(pid)) fail("not_permitted", `refusing to kill pid ${pid} (the host or a process that launched it, e.g. the browser)`);
-
-      // Always decide on a fresh scan: the pid must own a listening port right now.
-      const owned = (await freshScan()).filter((l) => l.pid === pid);
-      if (owned.length === 0) fail("not_found", `pid ${pid} does not own a listening TCP port`);
-      const { mine, owner } = await deps.isMine(owned[0]);
-      if (!mine) {
-        fail("not_permitted", `pid ${pid} belongs to ${owner ?? "an unknown user"}, not ${deps.user ?? "the current user"}`);
+      if (req.tree !== undefined && typeof req.tree !== "boolean") fail("bad_request", "`tree` must be a boolean");
+      const prot = await protectedSet();
+      if (Number.isInteger(pid) && prot.has(pid)) fail("not_permitted", `refusing to kill pid ${pid} (the host or a process that launched it, e.g. the browser)`);
+      const listener = await ownedListener(pid);
+      if (isContainerEngine(listener)) {
+        fail("not_permitted", `pid ${pid} (${listener.process ?? "container engine"}) forwards ports for containers; stopping it would cut them all off. Stop the container instead`);
       }
+
+      // Snapshot the tree before signalling: once the parent dies its children are
+      // re-parented and can no longer be found from it.
+      const descendants = req.tree ? descendantPids(pid, await deps.processPairs()) : [];
+      const sig = signal === "KILL" ? "SIGKILL" : "SIGTERM";
       try {
-        deps.signal(pid, signal === "KILL" ? "SIGKILL" : "SIGTERM");
+        deps.signal(pid, sig);
       } catch (err) {
         if (err.code === "ESRCH") fail("not_found", `pid ${pid} has already exited`);
         if (err.code === "EPERM") fail("not_permitted", `not allowed to signal pid ${pid}`);
         throw err;
       }
+      const killed = [pid];
+      // Parent first, so supervisors (nodemon, turbo) are already shutting down and
+      // don't restart the children we stop next. Same rules per child: not protected, same user.
+      const allowed = await mapLimit(descendants, 8, async (child) => {
+        if (prot.has(child)) return false;
+        return (await deps.isMine({ pid: child, user: null })).mine;
+      });
+      for (let i = 0; i < descendants.length; i++) {
+        if (!allowed[i]) continue;
+        try {
+          deps.signal(descendants[i], sig);
+          killed.push(descendants[i]);
+        } catch {
+          // already gone, or not ours after all: skip
+        }
+      }
       cache = null;
-      return { id: req.id, ok: true, type: "kill", pid };
+      return { id: req.id, ok: true, type: "kill", pid, killed };
+    },
+
+    async reveal(req) {
+      const dir = await projectDir(req.pid);
+      const { file, args } = revealCommand(deps.platform, dir);
+      await launch(file, args, "the file manager");
+      return { id: req.id, ok: true, type: "reveal", path: dir };
+    },
+
+    async openEditor(req) {
+      const { editor } = req;
+      if (typeof editor !== "string" || !Object.hasOwn(EDITORS, editor)) {
+        fail("bad_request", `\`editor\` must be one of: ${EDITOR_IDS.join(", ")}`);
+      }
+      const dir = await projectDir(req.pid);
+      const cmd = await deps.editorCommand(editor, dir);
+      if (!cmd) fail("not_found", `${EDITORS[editor].label} is not installed (or its command-line tool is not on PATH)`);
+      await launch(cmd.file, cmd.args, EDITORS[editor].label);
+      return { id: req.id, ok: true, type: "openEditor", path: dir };
     },
   };
+
+  async function protectedSet() {
+    return typeof deps.protectedPids === "function" ? await deps.protectedPids() : deps.protectedPids;
+  }
+
+  /** The pid must own a listening port right now (fresh scan) and run as the current user. */
+  async function ownedListener(pid) {
+    if (!Number.isInteger(pid) || pid <= 0) fail("bad_request", "`pid` must be a positive integer");
+    const owned = (await freshScan()).filter((l) => l.pid === pid);
+    if (owned.length === 0) fail("not_found", `pid ${pid} does not own a listening TCP port`);
+    const { mine, owner } = await deps.isMine(owned[0]);
+    if (!mine) {
+      fail("not_permitted", `pid ${pid} belongs to ${owner ?? "an unknown user"}, not ${deps.user ?? "the current user"}`);
+    }
+    return owned[0];
+  }
+
+  /** Working directory of a listener the user owns; refuses container forwarders (their cwd is not a project). */
+  async function projectDir(pid) {
+    const listener = await ownedListener(pid);
+    if (isContainerEngine(listener)) fail("not_permitted", `pid ${pid} is a container engine, not a project process`);
+    const dir = listener.cwd;
+    if (!dir || !path.isAbsolute(dir)) fail("not_found", `working directory of pid ${pid} is unknown`);
+    if (!(await deps.isDirectory(dir))) fail("not_found", `${dir} no longer exists`);
+    return dir;
+  }
+
+  async function launch(file, args, what) {
+    try {
+      await deps.launch(file, args);
+    } catch (err) {
+      if (err?.code === "ENOENT") fail("not_found", `could not start ${what}: ${path.basename(file)} not found`);
+      throw err;
+    }
+  }
 
   /** Never throws: always resolves to a protocol Response. */
   return async function handle(req) {

@@ -117,11 +117,67 @@ test("kill terminates a listening child and refuses non-listeners", { skip: !sup
     assert.equal(refused.error.code, "not_found");
 
     const res = await host.request({ type: "kill", pid: child.pid });
-    assert.deepEqual(res, { id: res.id, ok: true, type: "kill", pid: child.pid });
+    assert.deepEqual(res, { id: res.id, ok: true, type: "kill", pid: child.pid, killed: [child.pid] });
     await waitExit(child);
     assert.equal(child.signalCode, "SIGTERM");
   } finally {
     child.kill("SIGKILL");
+    idle.kill("SIGKILL");
+  }
+});
+
+test("kill with tree stops the listener and its non-listening descendants", { skip: !supported }, async () => {
+  // listener (like nodemon/vite) -> worker -> grandchild; only the top one listens.
+  const script = `
+    const { spawn } = require("child_process");
+    const net = require("net");
+    const worker = spawn(process.execPath, ["-e", \`
+      const g = require("child_process").spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+      console.log(g.pid); setInterval(()=>{},1000);
+    \`], { stdio: ["ignore", "pipe", "inherit"] });
+    worker.stdout.once("data", (d) => {
+      net.createServer().listen(0, "127.0.0.1", () => console.log(JSON.stringify({ worker: worker.pid, grandchild: Number(String(d).trim()) })));
+    });
+    process.on("SIGTERM", () => {}); // a stubborn parent: TERM alone would leave it, so use KILL below
+  `;
+  const parent = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+  const pids = JSON.parse(String(await new Promise((r) => parent.stdout.once("data", r))));
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  try {
+    assert.ok(alive(pids.worker) && alive(pids.grandchild));
+    // A non-listening child is not a valid target on its own.
+    assert.equal((await host.request({ type: "kill", pid: pids.worker, tree: true })).error.code, "not_found");
+
+    const res = await host.request({ type: "kill", pid: parent.pid, signal: "KILL", tree: true });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    assert.deepEqual([...res.killed].sort(), [parent.pid, pids.worker, pids.grandchild].sort());
+    await waitExit(parent);
+    for (let i = 0; i < 50 && (alive(pids.worker) || alive(pids.grandchild)); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(alive(pids.worker), false, "worker orphan left behind");
+    assert.equal(alive(pids.grandchild), false, "grandchild orphan left behind");
+  } finally {
+    for (const p of [parent.pid, pids.worker, pids.grandchild]) {
+      try {
+        process.kill(p, "SIGKILL");
+      } catch {}
+    }
+  }
+});
+
+test("reveal and openEditor refuse a pid that does not listen", { skip: !supported }, async () => {
+  const idle = spawn(process.execPath, ["-e", "setTimeout(()=>{},60000)"], { stdio: "ignore" });
+  try {
+    assert.equal((await host.request({ type: "reveal", pid: idle.pid })).error.code, "not_found");
+    assert.equal((await host.request({ type: "openEditor", pid: idle.pid, editor: "vscode" })).error.code, "not_found");
+    assert.equal((await host.request({ type: "openEditor", pid: idle.pid, editor: "notepad" })).error.code, "bad_request");
+  } finally {
     idle.kill("SIGKILL");
   }
 });

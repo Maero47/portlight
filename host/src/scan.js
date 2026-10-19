@@ -18,7 +18,7 @@ const MAX_COMMAND = 2000; // keep list responses well under Chrome's 1 MB limit
  * Run a command and resolve its stdout. Non-zero exit with output still resolves
  * (lsof exits 1 when some pids are gone or nothing matched).
  */
-export function run(cmd, args, { timeout = 3000 } = {}) {
+export function run(cmd, args, { timeout = 3000, strict = false } = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       cmd,
@@ -27,8 +27,8 @@ export function run(cmd, args, { timeout = 3000 } = {}) {
       (err, stdout) => {
         if (!err) return resolve(stdout);
         // Non-zero exit (lsof exits 1 on "no matches" or vanished pids): keep what it printed.
-        // Spawn failures (ENOENT) and timeouts reject.
-        if (typeof err.code === "number" && !err.killed) return resolve(stdout || "");
+        // Spawn failures (ENOENT), timeouts and (with `strict`) any non-zero exit reject.
+        if (!strict && typeof err.code === "number" && !err.killed) return resolve(stdout || "");
         reject(err);
       },
     );
@@ -213,11 +213,10 @@ export async function processUid(pid, exec = run) {
 }
 
 /**
- * Pids from `pid` up through its ancestors (the host, its launcher shell, the browser, ...).
- * Unix: `ps -A -o pid=,ppid=`. Windows: Win32_Process via PowerShell (slow, so callers cache it).
+ * [pid, ppid] pairs for every process. Unix: `ps -A -o pid=,ppid=`.
+ * Windows: Win32_Process via PowerShell (slow, so callers cache it). [] on failure.
  */
-export async function ancestorPids(pid, { platform = process.platform, exec = run } = {}) {
-  const parent = new Map();
+export async function processPairs({ platform = process.platform, exec = run } = {}) {
   try {
     if (platform === "win32") {
       const out = await exec(
@@ -225,16 +224,43 @@ export async function ancestorPids(pid, { platform = process.platform, exec = ru
         ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
         { timeout: 10000 },
       );
-      for (const [k, v] of parsePidPairs(out)) parent.set(k, v);
-    } else {
-      for (const [k, v] of parsePidPairs(await exec("ps", ["-A", "-o", "pid=,ppid="]))) parent.set(k, v);
+      return parsePidPairs(out);
     }
+    return parsePidPairs(await exec("ps", ["-A", "-o", "pid=,ppid="]));
   } catch {
-    // fall through with what we know
+    return [];
   }
+}
+
+/** Pids from `pid` up through its ancestors (the host, its launcher shell, the browser, ...). */
+export async function ancestorPids(pid, opts = {}) {
+  const parent = new Map(await processPairs(opts));
   const chain = new Set();
   for (let p = pid; p > 0 && !chain.has(p); p = parent.get(p) ?? 0) chain.add(p);
   return chain;
+}
+
+/** Every descendant of `pid` (children first, breadth-first), from [pid, ppid] pairs. */
+export function descendantPids(pid, pairs) {
+  const children = new Map();
+  for (const [p, pp] of pairs) {
+    if (p === pp) continue;
+    const list = children.get(pp) ?? [];
+    list.push(p);
+    children.set(pp, list);
+  }
+  const out = [];
+  const seen = new Set([pid]);
+  const queue = [pid];
+  while (queue.length) {
+    for (const c of children.get(queue.shift()) ?? []) {
+      if (seen.has(c)) continue;
+      seen.add(c);
+      out.push(c);
+      queue.push(c);
+    }
+  }
+  return out;
 }
 
 /** Windows only: the owning user of one pid ("DOMAIN\\user"), or null. */
