@@ -2,7 +2,7 @@
 // extension in Chromium, real TCP servers, and the popup reading them back.
 import { expect, test, type BrowserContext, type Page, type Worker } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pinnedExtensionId } from "../../scripts/extension-id.mjs";
@@ -241,6 +241,28 @@ test("share link: created through the background worker, survives the popup clos
   await again.getByRole("button", { name: "Stop Sharing" }).click();
   await expect(again.locator(".shared")).toHaveCount(0);
   await expect.poll(() => alive(run.pid), { timeout: 5000 }).toBe(false);
+});
+
+test("share link: cancelling while it is created leaves no tunnel process and no public link", async () => {
+  test.setTimeout(60_000);
+  const api = row(servers.api.port);
+  const runFile = join(fakeBin, "run.json");
+  for (const when of ["right away", "after cloudflared started"] as const) {
+    rmSync(runFile, { force: true });
+    await api.click({ button: "right" });
+    await page.locator("#menu").getByRole("menuitem", { name: "Share Public Link…" }).click();
+    await api.getByRole("button", { name: "Create Link" }).click();
+    await expect(api.locator(".confirm-text")).toHaveText("Creating a public link… This takes a few seconds.");
+    if (when === "after cloudflared started") await expect.poll(() => existsSync(runFile), { timeout: 5000 }).toBe(true);
+    await api.getByRole("button", { name: "Cancel" }).click();
+    await expect(api).not.toHaveClass(/confirming/);
+    // Wait past the moment the fake would have printed its URL.
+    await new Promise((r) => setTimeout(r, FAKE_DELAY_MS + 1500));
+    if (existsSync(runFile)) expect(alive(fakeRun().pid), `${when}: tunnel process`).toBe(false);
+    const st = await page.evaluate(() => chrome.runtime.sendMessage({ type: "portlight:tunnel", op: "status" }));
+    expect(st.tunnels, `${when}: status`).toEqual([]);
+    await expect(api.locator(".shared")).toHaveCount(0);
+  }
 });
 
 test("kill quits a real process and the row goes away", async () => {

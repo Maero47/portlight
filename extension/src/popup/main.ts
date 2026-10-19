@@ -723,7 +723,11 @@ async function startShare(key: string) {
   // Cancelled while it was starting: the failure is expected, not news.
   const cancelled = !state.sharing.has(r.port);
   state.sharing.delete(r.port);
-  if (cancelled) return;
+  if (cancelled) {
+    // The worker makes sure nothing is left running; show what it now reports.
+    await refreshTunnels();
+    return;
+  }
   applyTunnelReply(reply, r.port);
   const t = tunnelFor(r.port);
   if (t) announce(`Public link ready: ${t.url}`);

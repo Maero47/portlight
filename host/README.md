@@ -88,7 +88,9 @@ with `--enable-logging=stderr`.
 
 Tunnels are child processes of the host, started with `spawn` and a fixed argument list (never a
 shell), from a binary named exactly `cloudflared` or `ngrok` on PATH or in the usual Homebrew
-locations. A tunnel stops when asked, when its port stops listening (checked every 5 s, two misses
+locations. A start registers its port as `starting` before the port check runs, so `tunnelStop`
+cancels it at any point: before the binary is spawned (nothing starts), after (the process is killed),
+or as the URL arrives (it is never returned); the start then fails with `cancelled`. A tunnel stops when asked, when its port stops listening (checked every 5 s, two misses
 in a row), and when the host exits (stdin closed, SIGTERM/SIGINT/SIGHUP or normal exit). If the host
 is killed with SIGKILL its tunnel can outlive it, since macOS has no "die with parent". The extension
 runs share links from its background worker, which keeps one host connection open only while a

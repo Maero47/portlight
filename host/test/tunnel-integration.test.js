@@ -136,6 +136,52 @@ test("status during a slow start lists the tunnel as starting, and the link stil
   }
 });
 
+test("cancel at every phase: afterwards no tunnel process runs and no URL is reported", { skip: !supported, timeout: 40_000 }, async () => {
+  const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}`, PORTLIGHT_FAKE_CF_DELAY_MS: "3000" };
+  const server = await listen();
+  const { port } = server.address();
+  const host = startHost(env);
+  const runFile = path.join(dir, "argv.json");
+  const noTunnel = async () => {
+    const st = await host.request({ type: "tunnelStatus" });
+    assert.deepEqual(st.tunnels, [], "status reports nothing");
+  };
+  try {
+    // 1. Stop sent right behind the start: it lands while the host is still scanning the port.
+    fs.rmSync(runFile, { force: true });
+    const [early, stop1] = await Promise.all([host.request({ type: "tunnelStart", port }), host.request({ type: "tunnelStop", port })]);
+    assert.equal(stop1.stopped, true);
+    assert.equal(early.ok, false);
+    assert.equal(early.error.code, "cancelled");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(fs.existsSync(runFile), false, "cloudflared was never started");
+    await noTunnel();
+
+    // 2. Stop after cloudflared started, before it printed its URL.
+    const mid = host.request({ type: "tunnelStart", port });
+    assert.ok(await until(() => fs.existsSync(runFile)), "spawned");
+    const { pid } = JSON.parse(fs.readFileSync(runFile, "utf8"));
+    assert.equal((await host.request({ type: "tunnelStop", port })).stopped, true);
+    const midRes = await mid;
+    assert.equal(midRes.ok, false);
+    assert.equal(midRes.error.code, "cancelled");
+    assert.ok(await until(() => !alive(pid)), "the half-started tunnel is gone");
+    await noTunnel();
+
+    // 3. Stop after the URL: the ordinary case.
+    fs.rmSync(runFile, { force: true });
+    const late = await host.request({ type: "tunnelStart", port });
+    assert.equal(late.ok, true);
+    const pid3 = JSON.parse(fs.readFileSync(runFile, "utf8")).pid;
+    await host.request({ type: "tunnelStop", port });
+    assert.ok(await until(() => !alive(pid3)));
+    await noTunnel();
+  } finally {
+    host.child.stdin.end();
+    await new Promise((r) => server.close(r));
+  }
+});
+
 test("tunnelStart refuses a port nobody listens on, without starting anything", { skip: !supported }, async () => {
   const env = { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH}` };
   fs.rmSync(path.join(dir, "argv.json"), { force: true });

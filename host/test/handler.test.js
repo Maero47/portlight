@@ -279,7 +279,8 @@ function fakeTunnels() {
     stopped,
     providers: () => ({ cloudflared: true, ngrok: false }),
     list: () => started.map(([port]) => ({ port, provider: "cloudflared", url: `https://p${port}.trycloudflare.com`, startedAt: "t" })),
-    start: async (port, host, provider) => {
+    start: async (port, target, provider) => {
+      const host = await target();
       started.push([port, host, provider]);
       if (port === 4444) throw { code: "internal", message: "429 Too Many Requests" };
       return { port, provider: "cloudflared", url: `https://p${port}.trycloudflare.com`, startedAt: "t" };
@@ -341,4 +342,25 @@ test("tunnelStop before any tunnel exists is a no-op", async () => {
   const { handle } = setup([]);
   assert.deepEqual(await handle({ id: "x", type: "tunnelStop", port: 3000 }), { id: "x", ok: true, type: "tunnelStop", port: 3000, stopped: false });
   assert.equal((await handle({ id: "y", type: "tunnelStop", port: -1 })).error.code, "bad_request");
+});
+
+test("tunnelStop that arrives during tunnelStart's port scan cancels it before anything is spawned", async () => {
+  const { createTunnelManager } = await import("../src/tunnel.js");
+  const spawned = [];
+  const tunnels = createTunnelManager({ find: (n) => `/bin/${n}`, spawn: (f, a) => (spawned.push([f, ...a]), { on() {}, once() {} }) });
+  let releaseScan;
+  const scanned = new Promise((r) => (releaseScan = r));
+  const { handle } = setup([], {
+    deps: {
+      tunnels,
+      scan: async () => (await scanned, [L({ port: 5173, pid: 10 })]),
+    },
+  });
+  const start = handle({ id: "s", type: "tunnelStart", port: 5173 });
+  const stop = await handle({ id: "x", type: "tunnelStop", port: 5173 });
+  assert.equal(stop.stopped, true, "the starting port is already registered");
+  releaseScan();
+  assert.deepEqual(await start, { id: "s", ok: false, error: { code: "cancelled", message: "the share link for port 5173 was cancelled" } });
+  assert.deepEqual(spawned, []);
+  assert.deepEqual((await handle({ id: "t", type: "tunnelStatus" })).tunnels, []);
 });

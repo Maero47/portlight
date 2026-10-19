@@ -85,6 +85,7 @@ export function createTunnelManager({
   }
 
   function kill(t) {
+    if (!t.child) return; // cancelled before it was spawned
     if (t.child.exitCode !== null || t.child.signalCode !== null) return;
     try {
       t.child.kill("SIGTERM");
@@ -135,10 +136,16 @@ export function createTunnelManager({
   }
 
   /**
-   * Start (or return the running) tunnel for `port`, forwarding to `host` (an IP literal).
+   * Start (or return the running) tunnel for `port`. `target` is the IP literal to forward to,
+   * or an async function that finds it (the handler's port/ownership check).
+   *
+   * The port is registered as "starting" synchronously, before anything is awaited, so a
+   * stop that arrives at any point — during the check, after spawn, before the URL — finds
+   * it. After every await the start checks it is still registered; if not, it was cancelled:
+   * nothing is spawned, or the child is killed, and the start rejects with code "cancelled".
    * Rejects with { code, message } when no provider is installed or the tunnel fails.
    */
-  function start(port, host, provider) {
+  function start(port, target, provider) {
     const existing = tunnels.get(port);
     if (existing) return existing.ready;
     if (tunnels.size >= MAX_TUNNELS) return Promise.reject({ code: "not_permitted", message: `at most ${MAX_TUNNELS} share links at a time` });
@@ -146,48 +153,68 @@ export function createTunnelManager({
     const bin = id ? find(id) : null;
     if (!id || !bin) return Promise.reject({ code: "not_found", message: provider ? `${provider} is not installed` : "neither cloudflared nor ngrok is installed" });
 
-    const hostPort = `${host.includes(":") ? `[${host}]` : host}:${port}`;
-    const child = spawn(bin, PROVIDERS[id].args(`http://${hostPort}`, hostPort));
-    const t = { port, provider: id, url: null, startedAt: now().toISOString(), child, ready: null, misses: 0 };
+    const t = { port, provider: id, url: null, startedAt: now().toISOString(), child: null, ready: null, misses: 0 };
     tunnels.set(port, t);
     syncWatcher();
+    const cancelled = () => tunnels.get(port) !== t;
+    const CANCELLED = { code: "cancelled", message: `the share link for port ${port} was cancelled` };
 
-    t.ready = new Promise((resolve, reject) => {
-      let log = "";
-      let settled = false;
-      const done = (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (err) {
-          if (tunnels.get(port) === t) tunnels.delete(port);
-          kill(t);
-          syncWatcher();
-          reject(err);
-        } else resolve(view(t));
-      };
-      const onData = (chunk) => {
-        if (settled) return;
-        log = (log + chunk.toString("utf8")).slice(-MAX_LOG);
-        const url = PROVIDERS[id].url(log);
-        if (url) {
-          t.url = url;
-          done(null);
-        }
-      };
-      child.stdout?.on("data", onData);
-      child.stderr?.on("data", onData);
-      child.once("error", (err) =>
-        done({ code: err?.code === "ENOENT" ? "not_found" : "internal", message: `could not start ${id}: ${err?.message ?? err}` }),
-      );
-      child.once("exit", () => {
+    t.ready = (async () => {
+      let host;
+      try {
+        host = typeof target === "function" ? await target() : target;
+      } catch (err) {
         if (tunnels.get(port) === t) tunnels.delete(port);
         syncWatcher();
-        done({ code: "internal", message: tunnelError(id, log) });
+        throw err;
+      }
+      if (cancelled()) throw CANCELLED; // stopped during the check: never spawn
+
+      const hostPort = `${host.includes(":") ? `[${host}]` : host}:${port}`;
+      const child = spawn(bin, PROVIDERS[id].args(`http://${hostPort}`, hostPort));
+      t.child = child;
+      return await new Promise((resolve, reject) => {
+        let log = "";
+        let settled = false;
+        const done = (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          // After a stop, every outcome is "cancelled" — a URL that still arrives is never handed out.
+          if (cancelled()) err = CANCELLED;
+          if (err) {
+            if (tunnels.get(port) === t) tunnels.delete(port);
+            kill(t);
+            syncWatcher();
+            reject(err);
+          } else resolve(view(t));
+        };
+        const onData = (chunk) => {
+          if (settled) return;
+          log = (log + chunk.toString("utf8")).slice(-MAX_LOG);
+          const url = PROVIDERS[id].url(log);
+          if (url) {
+            t.url = url;
+            done(null);
+          }
+        };
+        child.stdout?.on("data", onData);
+        child.stderr?.on("data", onData);
+        child.once("error", (err) =>
+          done({ code: err?.code === "ENOENT" ? "not_found" : "internal", message: `could not start ${id}: ${err?.message ?? err}` }),
+        );
+        // A tunnel that dies after its URL was handed out must leave the list too (done() is a no-op then).
+        child.once("exit", () => {
+          done({ code: "internal", message: tunnelError(id, log) });
+          if (tunnels.get(port) === t) tunnels.delete(port);
+          syncWatcher();
+        });
+        const timer = setTimeout(() => done({ code: "internal", message: `${id} did not print a public URL within ${Math.round(startTimeoutMs / 1000)} s` }), startTimeoutMs);
+        timer.unref?.();
+        // Stopped between spawn and these listeners (cannot happen synchronously, but cheap to honour).
+        if (cancelled()) done(CANCELLED);
       });
-      const timer = setTimeout(() => done({ code: "internal", message: `${id} did not print a public URL within ${Math.round(startTimeoutMs / 1000)} s` }), startTimeoutMs);
-      timer.unref?.();
-    });
+    })();
     return t.ready;
   }
 

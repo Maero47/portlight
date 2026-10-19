@@ -63,6 +63,8 @@ export function createTunnelService(opts: {
   /** tunnelStart requests in flight, by port. While any is pending the helper must stay: closing it kills the tunnel being born. */
   const pending = new Map<number, number>();
   let starting = 0;
+  /** Ports whose start the user cancelled while it was pending. */
+  const cancelled = new Set<number>();
 
   const close = () => {
     if (timer !== null) clearTimer(timer);
@@ -132,13 +134,21 @@ export function createTunnelService(opts: {
           await c.client.tunnelStart(op.port);
         } catch (e) {
           settle();
+          cancelled.delete(op.port);
           await poll();
           throw e;
         }
         settle();
+        if (cancelled.delete(op.port)) {
+          // Cancelled, yet the helper still produced a link (e.g. an older helper that doesn't
+          // honour a stop mid-start): take it down again, and never report it as a success.
+          await c.client.tunnelStop(op.port).catch(() => {});
+          await poll();
+          return { ok: false, code: "cancelled", message: `the share link for port ${op.port} was cancelled` };
+        }
       } else if (op.op === "stop") {
         // A cancelled start is no longer reported as starting; `starting` still keeps the helper until it settles.
-        pending.delete(op.port);
+        if (pending.delete(op.port)) cancelled.add(op.port);
         if (conn) await conn.client.tunnelStop(op.port);
       }
       return { ok: true, ...(await status(op.op === "providers")) };

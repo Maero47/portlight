@@ -280,9 +280,10 @@ export function createHandler(overrides = {}) {
       const { port, provider } = req;
       if (!isValidPort(port)) fail("bad_request", "`port` must be an integer port 1-65535");
       if (provider !== undefined && !PROVIDER_IDS.includes(provider)) fail("bad_request", `\`provider\` must be one of: ${PROVIDER_IDS.join(", ")}`);
-      const host = await shareableTarget(port);
       try {
-        const tunnel = await tunnels().start(port, host, provider);
+        // The manager registers the port before the ownership check runs, so a tunnelStop that
+        // arrives during the check (requests are handled concurrently) still cancels this start.
+        const tunnel = await tunnels().start(port, () => shareableTarget(port), provider);
         return { id: req.id, ok: true, type: "tunnelStart", tunnel };
       } catch (err) {
         if (err instanceof ProtocolError || !err?.code) throw err;

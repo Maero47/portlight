@@ -161,6 +161,37 @@ describe("tunnel service (background worker)", () => {
     expect(live.closed()).toBe(1);
   });
 
+  test("a cancelled start that still comes back with a URL is stopped again and reported as cancelled", async () => {
+    const gate = deferred();
+    // An older helper: ignores the stop while starting, then prints its URL anyway.
+    const { svc, live } = setup();
+    (live.client.tunnelStart as any).mockImplementationOnce(async (port: number) => {
+      live.calls.push(`start:${port}`);
+      await gate.promise;
+      live.tunnels.push(T(port));
+      return { tunnel: T(port) };
+    });
+    (live.client.tunnelStop as any).mockImplementationOnce(async (port: number) => {
+      live.calls.push(`stop:${port}`);
+      return { stopped: false }; // nothing registered yet on this helper
+    });
+    const started = svc.handle({ op: "start", port: 5173 });
+    await vi.waitFor(() => expect(live.calls).toEqual(["start:5173"]));
+    await svc.handle({ op: "stop", port: 5173 });
+    gate.resolve();
+    expect(await started).toMatchObject({ ok: false, code: "cancelled" });
+    expect(live.calls).toEqual(["start:5173", "stop:5173", "stop:5173"]);
+    expect(live.tunnels).toEqual([]);
+    expect(svc.connected).toBe(false);
+    expect(await svc.handle({ op: "status" })).toEqual({ ok: true, providers: PROVIDERS, tunnels: [] });
+  });
+
+  test("a stop for a port that isn't starting doesn't poison a later start", async () => {
+    const { svc } = setup();
+    await svc.handle({ op: "stop", port: 5173 });
+    expect(await svc.handle({ op: "start", port: 5173 })).toMatchObject({ ok: true, tunnels: [T(5173)] });
+  });
+
   test("a late status reply from a replaced helper never closes the new one", async () => {
     const { svc, live } = setup();
     await svc.handle({ op: "start", port: 5173 });

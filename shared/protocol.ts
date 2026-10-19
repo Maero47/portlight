@@ -77,4 +77,4 @@ export type Response =
   | { id: string; ok: true; type: "tunnelStatus"; providers: Record<TunnelProvider, boolean>; tunnels: Tunnel[] }
   | { id: string; ok: true; type: "tunnelStart"; tunnel: Tunnel }
   | { id: string; ok: true; type: "tunnelStop"; port: number; stopped: boolean }
-  | { id: string; ok: false; error: { code: "bad_request" | "not_permitted" | "not_found" | "internal"; message: string } };
+  | { id: string; ok: false; error: { code: "bad_request" | "not_permitted" | "not_found" | "cancelled" | "internal"; message: string } }; // cancelled: tunnelStart stopped before it finished
