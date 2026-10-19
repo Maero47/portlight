@@ -1,0 +1,14 @@
+{
+  "name": "portlight-host",
+  "version": "0.1.0",
+  "description": "Native messaging host for the Portlight Chrome extension: reports TCP listeners on this machine.",
+  "private": true,
+  "type": "module",
+  "bin": { "portlight-host": "src/main.js" },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

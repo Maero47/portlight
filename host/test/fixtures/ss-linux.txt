@@ -1,0 +1,7 @@
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
+LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*
+LISTEN 0      128          0.0.0.0:22         0.0.0.0:*
+LISTEN 0      511        127.0.0.1:3000       0.0.0.0:*    users:(("node",pid=4242,fd=21))
+LISTEN 0      511                *:8080             *:*    users:(("node",pid=5001,fd=20),("node",pid=5002,fd=20))
+LISTEN 0      244            [::1]:5432          [::]:*    users:(("postgres",pid=900,fd=7))
+LISTEN 0      128             [::]:22            [::]:*
