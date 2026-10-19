@@ -25,6 +25,13 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["nativeMessaging", "alarms"],
-  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"]
+  "permissions": [
+    "nativeMessaging",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ]
 }
