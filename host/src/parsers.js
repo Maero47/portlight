@@ -219,12 +219,18 @@ export function parseTasklist(text) {
   return map;
 }
 
-/** Lines of "<pid> <ppid>" (ps -A -o pid=,ppid= or the PowerShell equivalent) -> [pid, ppid][] */
+/**
+ * Lines of "<pid> <ppid>" (ps -A -o pid=,ppid=) or "<pid> <ppid> <createdMs>" (the Windows
+ * PowerShell query) -> [pid, ppid] or [pid, ppid, createdMs] tuples. A creation time of 0
+ * means unknown and is dropped.
+ */
 export function parsePidPairs(text) {
   const out = [];
   for (const line of text.split(/\r?\n/)) {
-    const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
-    if (m) out.push([Number(m[1]), Number(m[2])]);
+    const m = /^\s*(\d+)\s+(\d+)(?:\s+(\d+))?\s*$/.exec(line);
+    if (!m) continue;
+    const created = m[3] ? Number(m[3]) : 0;
+    out.push(created > 0 ? [Number(m[1]), Number(m[2]), created] : [Number(m[1]), Number(m[2])]);
   }
   return out;
 }

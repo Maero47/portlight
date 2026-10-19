@@ -238,3 +238,13 @@ test("openEditor: whitelisted ids only, argv without a shell, clear not_found", 
   assert.equal((await handle({ id: "e4", type: "openEditor", pid: 20, editor: "vscode" })).error.code, "not_permitted");
   assert.equal(calls.launch.length, 1);
 });
+
+test("Windows tree kill never signals a stale-parent orphan", async () => {
+  const pairs = [[3000, 1200, 1760000100000], [3010, 3000, 1760000100500], [2100, 3000, 1759990000000]];
+  const { handle, calls } = setup([L({ port: 3000, pid: 3000 })], {
+    deps: { processPairs: async () => pairs, isMine: async () => ({ mine: true }) },
+  });
+  const r = await handle({ id: "w", type: "kill", pid: 3000, tree: true });
+  assert.deepEqual(r.killed, [3000, 3010]);
+  assert.ok(!calls.signal.some(([p]) => p === 2100));
+});

@@ -5,7 +5,9 @@ import { EDITOR_IDS, editorCommand, revealCommand } from "../src/launch.js";
 const only = (set) => (f) => set.includes(f);
 
 test("revealCommand per platform", () => {
-  assert.deepEqual(revealCommand("darwin", "/Users/dev/app"), { file: "/usr/bin/open", args: ["/Users/dev/app"] });
+  assert.deepEqual(revealCommand("darwin", "/Users/dev/app"), { file: "/usr/bin/open", args: ["-a", "Finder", "/Users/dev/app"] });
+  assert.deepEqual(revealCommand("darwin", "/Applications/Foo.app").args, ["-a", "Finder", "/Applications/Foo.app"], "never launches a bundle");
+  assert.equal(revealCommand("win32", "C:\\a,/select,C:\\b"), null, "Explorer comma switches");
   assert.deepEqual(revealCommand("linux", "/home/dev/app"), { file: "xdg-open", args: ["/home/dev/app"] });
   assert.deepEqual(revealCommand("win32", "C:\\dev\\app"), { file: "explorer.exe", args: ["C:\\dev\\app"] });
 });

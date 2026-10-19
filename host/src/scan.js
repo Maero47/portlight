@@ -212,16 +212,22 @@ export async function processUid(pid, exec = run) {
   }
 }
 
+// Windows keeps a dead parent's pid in ParentProcessId and reuses pids, so the creation
+// time is fetched too: a real child is never older than its parent.
+const WIN_PROCESS_QUERY =
+  "Get-CimInstance Win32_Process | ForEach-Object { $c = 0; if ($_.CreationDate) { $c = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; \"$($_.ProcessId) $($_.ParentProcessId) $c\" }";
+
 /**
- * [pid, ppid] pairs for every process. Unix: `ps -A -o pid=,ppid=`.
- * Windows: Win32_Process via PowerShell (slow, so callers cache it). [] on failure.
+ * [pid, ppid] pairs for every process. Unix: `ps -A -o pid=,ppid=` (orphans are re-parented,
+ * so ppid is always current). Windows: [pid, ppid, createdMs] from Win32_Process via
+ * PowerShell (slow, so callers cache it). [] on failure.
  */
 export async function processPairs({ platform = process.platform, exec = run } = {}) {
   try {
     if (platform === "win32") {
       const out = await exec(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
+        ["-NoProfile", "-NonInteractive", "-Command", WIN_PROCESS_QUERY],
         { timeout: 10000 },
       );
       return parsePidPairs(out);
@@ -240,10 +246,17 @@ export async function ancestorPids(pid, opts = {}) {
   return chain;
 }
 
-/** Every descendant of `pid` (children first, breadth-first), from [pid, ppid] pairs. */
+/**
+ * Every descendant of `pid` (children first, breadth-first), from [pid, ppid] or
+ * [pid, ppid, createdMs] tuples. With creation times (Windows), a child must not be older
+ * than its parent: an older "child" is an orphan whose real parent died and whose pid was
+ * reused. When the parent's time is known, a child without one is skipped too.
+ */
 export function descendantPids(pid, pairs) {
   const children = new Map();
-  for (const [p, pp] of pairs) {
+  const created = new Map();
+  for (const [p, pp, c] of pairs) {
+    if (c) created.set(p, c);
     if (p === pp) continue;
     const list = children.get(pp) ?? [];
     list.push(p);
@@ -253,8 +266,11 @@ export function descendantPids(pid, pairs) {
   const seen = new Set([pid]);
   const queue = [pid];
   while (queue.length) {
-    for (const c of children.get(queue.shift()) ?? []) {
+    const parent = queue.shift();
+    const parentAt = created.get(parent);
+    for (const c of children.get(parent) ?? []) {
       if (seen.has(c)) continue;
+      if (parentAt !== undefined && !(created.get(c) >= parentAt)) continue;
       seen.add(c);
       out.push(c);
       queue.push(c);

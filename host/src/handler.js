@@ -213,8 +213,9 @@ export function createHandler(overrides = {}) {
 
     async reveal(req) {
       const dir = await projectDir(req.pid);
-      const { file, args } = revealCommand(deps.platform, dir);
-      await launch(file, args, "the file manager");
+      const cmd = revealCommand(deps.platform, dir);
+      if (!cmd) fail("bad_request", `cannot reveal ${dir} safely on this platform`);
+      await launch(cmd.file, cmd.args, "the file manager");
       return { id: req.id, ok: true, type: "reveal", path: dir };
     },
 

@@ -46,10 +46,15 @@ export const EDITORS = Object.freeze({
 
 export const EDITOR_IDS = Object.keys(EDITORS);
 
-/** Argv that shows a directory in Finder / the desktop file manager / Explorer. */
+/**
+ * Argv that shows a directory in Finder / the desktop file manager / Explorer, or null.
+ * `dir` is always absolute, so it can't be read as an option. macOS names Finder
+ * explicitly: a plain `open Foo.app` would launch the app instead of showing it.
+ * Explorer splits its arguments on commas ("/select,"), so such paths are refused there.
+ */
 export function revealCommand(platform, dir) {
-  if (platform === "darwin") return { file: "/usr/bin/open", args: [dir] };
-  if (platform === "win32") return { file: "explorer.exe", args: [dir] };
+  if (platform === "darwin") return { file: "/usr/bin/open", args: ["-a", "Finder", dir] };
+  if (platform === "win32") return dir.includes(",") ? null : { file: "explorer.exe", args: [dir] };
   return { file: "xdg-open", args: [dir] };
 }
 

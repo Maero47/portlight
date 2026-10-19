@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { processUid, ancestorPids, windowsProcessUser, psFormat } from "../src/scan.js";
+import { processUid, ancestorPids, windowsProcessUser, psFormat, processPairs, descendantPids } from "../src/scan.js";
+import { parsePidPairs } from "../src/parsers.js";
 
 const fx = (name) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
 const fakeExec = (table) => async (cmd, args) => {
@@ -53,4 +54,28 @@ test("windowsProcessUser reads the owner from tasklist /V output", async () => {
   assert.equal(await windowsProcessUser(7312, short), null);
   // "INFO: No tasks are running..." -> null
   assert.equal(await windowsProcessUser(5, fakeExec({ "tasklist /V": "INFO: No tasks are running which match the specified criteria.\r\n" })), null);
+});
+
+// Fixture: dev server 3000 (created 1760000100000) -> 3010 -> 3020 are its real descendants.
+// 2100 (and its child 2110) were started by an older process that also had pid 3000, exited,
+// and left them running: Windows still reports ParentProcessId 3000, but they predate it.
+// 3030 claims parent 3000 with no creation time (access denied), so it can't be proven a child.
+test("parsePidPairs keeps Windows creation times and drops unknown ones", () => {
+  const t = parsePidPairs(fx("win32-process-tree.txt"));
+  assert.deepEqual(t.find(([p]) => p === 3010), [3010, 3000, 1760000100500]);
+  assert.deepEqual(t.find(([p]) => p === 3030), [3030, 3000]);
+  assert.deepEqual(parsePidPairs("  10  1\n"), [[10, 1]], "Unix pairs are unchanged");
+});
+
+test("Windows tree: an orphan older than its reused 'parent' pid is excluded", async () => {
+  const exec = fakeExec({ "powershell.exe -NoProfile -NonInteractive -Command Get-CimInstance Win32_Process": fx("win32-process-tree.txt") });
+  const pairs = await processPairs({ platform: "win32", exec });
+  assert.deepEqual(descendantPids(3000, pairs), [3010, 3020]);
+  assert.ok(!descendantPids(3000, pairs).includes(2100) && !descendantPids(3000, pairs).includes(2110));
+});
+
+test("descendantPids without creation times (Unix) follows ppid as before", () => {
+  const pairs = [[10, 5], [11, 10], [12, 11], [13, 10], [99, 5]];
+  assert.deepEqual(descendantPids(10, pairs), [11, 13, 12]);
+  assert.deepEqual(descendantPids(99, pairs), []);
 });
