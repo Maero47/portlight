@@ -161,7 +161,7 @@ const ENTRIES: Entry[] = [
       const cli = /gvproxy|podman/i.test(proc) ? "podman" : "docker";
       return {
         about: `Published by ${c.project ? `the “${c.project}” compose project` : "a container"}. Quitting the proxy would take every container down with it.`,
-        command: `${cli} stop ${c.name}`,
+        command: SAFE_CONTAINER.test(c.name) ? `${cli} stop ${c.name}` : undefined,
         noQuit: true,
       };
     },
@@ -184,13 +184,20 @@ const ENTRIES: Entry[] = [
   },
 ];
 
-/** "postgresql@16" from "/opt/homebrew/opt/postgresql@16/bin/postgres". */
+// Commands built from process data end up pasted into a terminal, so anything interpolated
+// must match the tool's real naming rules; otherwise no command is offered.
+const SAFE_FORMULA = /^[A-Za-z0-9][A-Za-z0-9@._+-]*$/;
+const SAFE_CONTAINER = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/; // Docker's own rule for container names
+
+/** "postgresql@16" from "/opt/homebrew/opt/postgresql@16/bin/postgres"; null if it isn't a plain formula name. */
 export function brewFormula(command: string | null | undefined): string | null {
   const m = /(?:\/opt\/homebrew|\/usr\/local|\/home\/linuxbrew\/\.linuxbrew)\/(?:opt|Cellar)\/([^/\s]+)\//.exec(command ?? "");
-  return m?.[1] ?? null;
+  const f = m?.[1];
+  return f && SAFE_FORMULA.test(f) ? f : null;
 }
 
-const BREW_SERVICES = /^(postgres(ql)?|mysql|mariadb|redis|valkey|mongodb|memcached|rabbitmq|nginx|httpd|elasticsearch|opensearch|minio|influxdb|etcd|php|dnsmasq|clickhouse|meilisearch|ollama)/i;
+const BREW_SERVICES =
+  /^(postgres(ql)?|mysql|mariadb|redis|valkey|mongodb|memcached|rabbitmq|nginx|httpd|elasticsearch|opensearch|minio|influxdb|etcd|php|dnsmasq|clickhouse|meilisearch|ollama)([@-][A-Za-z0-9.@_+-]*)?$/i;
 
 /** What Portlight knows about a listener, or null for an ordinary one. */
 export function knownFor(r: Classifiable): Known | null {
