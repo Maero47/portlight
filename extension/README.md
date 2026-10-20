@@ -77,7 +77,8 @@ Not now, the close button, Esc and a click outside all put the sheet away. That 
 reopens it. The sheet opens by itself again after 14 days, or when the failure changes (missing to
 installed for another ID). An extension update alone does not bring it back, because store updates
 arrive silently and a sheet appearing then would have no visible cause. A working helper clears the
-saved choice.
+saved choice. When the HTTP scan was picked from the error screen (the helper is installed but not
+answering), the banner offers Try Again instead of the installer.
 
 The sheet is a modal dialog: the list underneath is inert, Tab stays inside, and focus goes back to
 where it was. It rises on the `SETTLE` spring and leaves on the exit curve; with reduced motion it only

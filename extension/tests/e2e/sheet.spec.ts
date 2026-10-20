@@ -217,3 +217,73 @@ for (const how of ["system", "setting"] as const) {
     await expect(sheet(page)).toBeVisible();
   });
 }
+
+// ---------- the fallback scan across live / fallback switches ----------
+
+test("fallback → live → fallback mid-scan leaves exactly one rescan chain and the newest rows", async ({ page }) => {
+  // Count the HTTP rescan timers (8 s) that are still pending.
+  await page.addInitScript(() => {
+    const pending = new Set<number>();
+    const set = window.setTimeout.bind(window);
+    const clear = window.clearTimeout.bind(window);
+    (window as any).setTimeout = (fn: any, ms?: number, ...rest: any[]) => {
+      const id: number = set(
+        (...a: any[]) => {
+          pending.delete(id);
+          typeof fn === "function" && fn(...a);
+        },
+        ms,
+        ...rest,
+      );
+      if (ms === 8000) pending.add(id);
+      return id;
+    };
+    (window as any).clearTimeout = (id?: number) => {
+      if (id !== undefined) pending.delete(id);
+      clear(id);
+    };
+    (window as any).__rescans = () => pending.size;
+  });
+  await openPopup(page, {
+    scenario: "missing",
+    httpPorts: { 3000: "Storefront" },
+    probeDelayMs: 600,
+    settings: { refreshMs: 500 },
+    local: { [DISMISS_KEY]: { at: Date.now(), failure: "missing" } },
+  });
+  await expect(page.locator("#app")).toHaveAttribute("data-mode", "fallback");
+  // The first scan's probes are still out: the helper arrives, then goes away again.
+  await page.evaluate(() => {
+    (window as any).__install();
+    window.dispatchEvent(new Event("focus"));
+  });
+  await expect(page.locator("#app")).toHaveAttribute("data-mode", "host");
+  await page.evaluate(() => (window as any).__uninstall());
+  await expect(page.locator("#app")).toHaveAttribute("data-mode", "fallback");
+  // Both scans' probes have answered by now.
+  await expect(page.locator("#status-text")).toHaveText("1 server · HTTP only");
+  await page.waitForTimeout(1500);
+  expect(await page.evaluate(() => (window as any).__rescans())).toBe(1);
+  await expect(page.locator("li.row")).toHaveCount(1);
+});
+
+test("HTTP scan chosen after an error: the banner offers Try Again, not the installer", async ({ page }) => {
+  // The helper is installed but exits without answering: the popup shows its error state.
+  await openPopup(page, { scenario: "crashed", httpPorts: HTTP });
+  await expect(page.locator(".state h2")).toHaveText("Couldn’t read ports");
+  await page.getByRole("button", { name: "Use HTTP Scan" }).click();
+  await expect(page.locator("#banner")).toContainText("HTTP only. The helper isn’t answering.");
+  await expect(page.getByRole("button", { name: "Install…" })).toHaveCount(0);
+  await expect(page.locator("#sheet-layer")).toBeHidden();
+
+  const retry = page.getByRole("button", { name: "Try Again" });
+  await retry.click();
+  await expect(page.locator("#app")).toHaveAttribute("data-mode", "fallback");
+  await expect(page.locator("#sheet-layer")).toBeHidden();
+  await expect(page.locator("#announcer")).toHaveText("The helper still isn’t answering.");
+
+  await page.evaluate(() => (window as any).__install());
+  await retry.click();
+  await expect(page.locator("#app")).toHaveAttribute("data-mode", "host");
+  await expect(page.locator("li.row")).toHaveCount(10);
+});

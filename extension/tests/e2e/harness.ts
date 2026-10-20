@@ -16,7 +16,8 @@ const TYPES: Record<string, string> = {
   ".json": "application/json",
 };
 
-export type Scenario = "list" | "empty" | "missing" | "forbidden";
+/** crashed: a helper that is installed but exits without answering. */
+export type Scenario = "list" | "empty" | "missing" | "forbidden" | "crashed";
 export interface MockTab {
   url: string;
   title: string;
@@ -82,6 +83,8 @@ export async function openPopup(
     tunnel?: MockTunnel;
     lan?: MockOptions["lan"];
     local?: MockOptions["local"];
+    /** Hold the answering ports' probes this long (a scan still in flight); closed ports refuse at once. */
+    probeDelayMs?: number;
     /** Favicons (SVG markup) per port, linked from the page that port serves. */
     favicons?: Record<number, string>;
     /** Screenshots and most tests run with Reduce Motion on, so nothing is caught mid-animation. */
@@ -104,7 +107,7 @@ export async function openPopup(
     return route.fulfill({ status: 200, body: readFileSync(file), contentType: TYPES[extname(file)] ?? "application/octet-stream" });
   });
   // HTTP fallback probes: only the ports in `httpPorts` answer.
-  await page.route(/^http:\/\/localhost:\d+\//, (route) => {
+  await page.route(/^http:\/\/localhost:\d+\//, async (route) => {
     const url = new URL(route.request().url());
     const port = Number(url.port);
     // Playwright can't intercept /favicon.ico itself, so mocked pages link their icon (unit tests cover /favicon.ico).
@@ -113,12 +116,13 @@ export async function openPopup(
     }
     const title = httpPorts[port];
     if (title === undefined) return route.abort("connectionrefused");
+    if (opts.probeDelayMs) await new Promise((r) => setTimeout(r, opts.probeDelayMs));
     return route.fulfill({
       status: 200,
       contentType: "text/html",
       headers: { "access-control-allow-origin": "*" },
       body: `<!doctype html><title>${title}</title>${favicons[port] ? `<link rel="icon" href="/icon.svg">` : ""}`,
-    });
+    }).catch(() => {}); // the probe may have timed out meanwhile
   });
 
   await page.emulateMedia({ colorScheme: scheme, reducedMotion });
@@ -170,11 +174,20 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
       ? "Specified native messaging host not found."
       : scenario === "forbidden"
         ? "Access to the specified native messaging host is forbidden."
-        : null;
+        : scenario === "crashed"
+          ? "Native host has exited."
+          : null;
   // "Run the installer": from now on the host answers with the full list.
   (window as any).__install = () => {
     failure = null;
     listeners = full();
+  };
+  // And the reverse: the helper goes away, dropping any open connection like Chrome does.
+  const live = new Set<() => void>();
+  (window as any).__uninstall = () => {
+    failure = "Specified native messaging host not found.";
+    listeners = [];
+    for (const drop of [...live]) drop();
   };
   const answer = (msg: any): any => {
     (window as any).__requests.push(msg);
@@ -246,11 +259,13 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
       const drop = () => {
         if (!open) return;
         open = false;
+        live.delete(drop);
         runtime.lastError = { message: failure };
         onDisc.forEach((f) => f());
         runtime.lastError = undefined;
       };
       if (failure) setTimeout(drop, 15);
+      else live.add(drop);
       return {
         onMessage: { addListener: (f: (m: any) => void) => onMsg.push(f) },
         onDisconnect: { addListener: (f: () => void) => onDisc.push(f) },

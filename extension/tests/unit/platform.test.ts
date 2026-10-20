@@ -65,6 +65,8 @@ describe("installPlan", () => {
     const p = installPlan(DEV, "linux", { forbidden: true });
     expect(p.needsId).toBe(true);
     expect(p.choices[0]!.command).toBe(`${NPX} --extension-id ${DEV}`);
+    // ./install.sh from the repo fixes it too, so the dev hint stays.
+    expect(p.devCommand).toBe("./install.sh");
   });
   it("the repo's ./install.sh is offered only to the dev build on macOS and Linux", () => {
     expect(installPlan(DEV, "mac").devCommand).toBe("./install.sh");

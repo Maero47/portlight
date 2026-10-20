@@ -592,7 +592,7 @@ function renderInstall() {
   } else {
     hint.textContent = "Homebrew installs the helper, then it connects itself to Chrome.";
   }
-  if (plan.devCommand && !plan.needsId) hint.insertAdjacentHTML("beforeend", ` From a clone of the repo, <code>${esc(plan.devCommand)}</code> does the same.`);
+  if (plan.devCommand) hint.insertAdjacentHTML("beforeend", ` From a clone of the repo, <code>${esc(plan.devCommand)}</code> does the same.`);
 }
 
 $("install-method").addEventListener("change", (e) => {

@@ -136,6 +136,8 @@ test("forbidden host shows the reconnect variant, with this extension's ID", asy
   await openPopup(page, { scenario: "forbidden" });
   await expect(page.getByRole("dialog")).toContainText("Reconnect the helper");
   await expect(page.locator(".sheet .code code")).toHaveText(`npx portlight-host install --extension-id ${PINNED_ID}`);
+  // The dev build can also just rerun the repo's installer.
+  await expect(page.locator(".sheet-hint.dev")).toHaveText("From a clone of the repo, ./install.sh does the same.");
   await page.keyboard.press("Escape");
   await expect(page.locator("#banner")).toContainText("The helper needs reconnecting.");
   await expect(page.getByRole("button", { name: "Fix…" })).toBeVisible();

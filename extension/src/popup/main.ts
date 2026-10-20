@@ -417,6 +417,12 @@ function followRestart() {
 }
 
 let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * Bumped whenever the fallback starts or ends. A scan from an earlier stint (fallback → live →
+ * fallback while its probes were still out) checks it after every await and stops, so it can't
+ * write rows or start a second rescan chain.
+ */
+let scanGen = 0;
 
 function fallbackPorts(): number[] {
   // Common dev ports, the user's extra ports, and every port an open tab points at.
@@ -424,22 +430,24 @@ function fallbackPorts(): number[] {
   return [...new Set([...COMMON_DEV_PORTS, ...extra, ...state.tabs.keys()])].sort((a, b) => a - b);
 }
 
-async function scanFallback(first = false) {
-  if (state.mode !== "fallback") return;
+async function scanFallback(first: boolean, gen: number) {
+  const stale = () => gen !== scanGen || state.mode !== "fallback";
+  if (stale()) return;
   // Every rescan also looks for the helper, so installing it turns the popup live by itself.
   if (!first) {
     await refresh();
-    if (state.mode !== "fallback") return;
+    if (stale()) return;
   }
   state.scanning = true;
   if (first) render();
   await refreshTabs(false);
+  if (stale()) return;
   const found: PortRow[] = first ? [] : state.rows.slice();
   const seen = new Set<number>();
   await probePorts(fallbackPorts(), {
     onOpen: (r) => {
-      // The helper may have connected meanwhile; a late probe must not touch its list.
-      if (state.mode !== "fallback") return;
+      // The helper may have connected meanwhile, or a newer scan took over.
+      if (stale()) return;
       seen.add(r.port);
       const row = probeToRow(r);
       const i = found.findIndex((x) => x.port === r.port);
@@ -451,14 +459,15 @@ async function scanFallback(first = false) {
       }
     },
   });
-  if (state.mode !== "fallback") return;
+  if (stale()) return;
   state.rows = found.filter((r) => seen.has(r.port)).sort((a, b) => a.port - b.port);
   state.scanning = false;
   render({ animate: true });
   beat();
   scheduleMeta();
   void updateSuggestion();
-  fallbackTimer = setTimeout(() => void scanFallback(), FALLBACK_RESCAN_MS);
+  clearTimeout(fallbackTimer);
+  fallbackTimer = setTimeout(() => void scanFallback(false, gen), FALLBACK_RESCAN_MS);
 }
 
 function startFallback() {
@@ -467,12 +476,13 @@ function startFallback() {
   state.rows = [];
   state.confirm = null;
   closeMenu(false);
-  void scanFallback(true);
+  void scanFallback(true, ++scanGen);
   if (!state.sheet) input.focus();
 }
 
 /** The helper answered: drop the HTTP rows so the real list cascades in fresh. */
 function leaveFallback() {
+  scanGen++;
   clearTimeout(fallbackTimer);
   state.scanning = false;
   state.rows = [];
@@ -1586,7 +1596,12 @@ function renderChrome() {
           : "The helper isn’t answering.";
     setHtml(
       banner,
-      `${icon.waves(14)}<span><strong>HTTP only.</strong> ${why}</span><button class="btn banner-btn" type="button" data-act="setup" aria-haspopup="dialog">${state.failure === "forbidden" ? "Fix…" : "Install…"}</button>`,
+      `${icon.waves(14)}<span><strong>HTTP only.</strong> ${why}</span>${
+        state.failure
+          ? `<button class="btn banner-btn" type="button" data-act="setup" aria-haspopup="dialog">${state.failure === "forbidden" ? "Fix…" : "Install…"}</button>`
+          : // Installed but not answering (from "Use HTTP Scan"): installing again isn't the next step.
+            `<button class="btn banner-btn" type="button" data-act="retry-helper">Try Again</button>`
+      }`,
     );
   } else {
     banner.hidden = true;
@@ -1829,7 +1844,7 @@ function sheetHowHtml(): string {
         ? `<p class="sheet-hint">Needs Node.js 18 or later, from <button class="link" type="button" data-act="open-url" data-url="${NODE_URL}">nodejs.org</button>.</p>`
         : `<p class="sheet-hint">Homebrew installs the helper, then it connects itself to Chrome.</p>`;
   }
-  if (plan.devCommand && !plan.needsId) {
+  if (plan.devCommand) {
     html += `<p class="sheet-hint dev">From a clone of the repo, <code>${esc(plan.devCommand)}</code> does the same.</p>`;
   }
   return html;
@@ -2347,6 +2362,16 @@ document.addEventListener("click", async (e) => {
     case "setup":
       openSheet();
       break;
+    case "retry-helper": {
+      btn.setAttribute("aria-disabled", "true");
+      await refresh();
+      if (state.mode === "fallback") {
+        btn.removeAttribute("aria-disabled");
+        announce("The helper still isn’t answering.");
+        shake(btn);
+      }
+      break;
+    }
     case "sheet-dismiss":
       if (state.sheet) closeSheet(state.sheet.phase !== "done");
       break;
