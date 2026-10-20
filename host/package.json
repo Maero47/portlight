@@ -8,9 +8,9 @@
   "files": ["src/*.js", "scripts/frame.js", "install.ps1", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "os": ["darwin", "linux", "win32"],
-  "repository": { "type": "git", "url": "git+https://github.com/Maero47/LocalHoster.git", "directory": "host" },
-  "homepage": "https://github.com/Maero47/LocalHoster#readme",
-  "bugs": { "url": "https://github.com/Maero47/LocalHoster/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/Maero47/portlight.git", "directory": "host" },
+  "homepage": "https://github.com/Maero47/portlight#readme",
+  "bugs": { "url": "https://github.com/Maero47/portlight/issues" },
   "scripts": {
     "start": "node src/main.js",
     "test": "node --test"
