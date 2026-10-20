@@ -39,9 +39,14 @@ run() {
 
 echo "Building the extension"
 cd "$ROOT/extension"
-if [ ! -d node_modules ]; then
-  echo "  installing build tools (npm ci, first run only)"
+# Re-run npm ci whenever the lockfile differs from the one last installed (e.g. after a
+# git pull that adds a dependency), not only when node_modules is missing.
+LOCK_HASH=$(node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync("package-lock.json")).digest("hex"))')
+STAMP=node_modules/.portlight-lock-hash
+if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$LOCK_HASH" ]; then
+  echo "  installing build tools (npm ci)"
   run npm ci --no-audit --no-fund
+  printf '%s\n' "$LOCK_HASH" >"$STAMP"
 fi
 run npm run build
 echo "  built      $ROOT/extension/dist"
