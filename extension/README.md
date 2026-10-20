@@ -1,10 +1,10 @@
-# Portlight — Chrome extension
+# Portlight Chrome extension
 
 Manifest V3 popup that shows which localhost ports are busy (process, project, exposure, uptime) and which are free.
 
 ```sh
 npm install
-npm run build          # → dist/, load it via chrome://extensions → "Load unpacked"
+npm run build          # writes dist/; load it in chrome://extensions with "Load unpacked"
 npm test               # unit tests (Vitest) + build + popup tests against a mocked host
 npm run test:e2e:real  # ../install.sh into a temp HOME, real host, real servers (macOS/Linux)
 npm run store:shots    # ../assets/store/screenshot-*.png from the real popup
@@ -18,43 +18,43 @@ helper with `npx portlight-host install` (or Homebrew), which is what the popup 
 
 ## How it works
 
-- `src/popup/` — the popup. Plain TypeScript and CSS, no framework, so it paints instantly.
+- `src/popup/` is the popup: plain TypeScript and CSS, no framework, so it paints instantly.
   The last list is cached locally and shown on open while a fresh one loads.
-- `src/background.ts` — keeps the toolbar badge up to date every 30 s. It counts only the groups chosen
+- `src/background.ts` keeps the toolbar badge up to date every 30 s. It counts only the groups chosen
   in settings (`badgeGroups`, default dev servers, databases and containers) and skips hidden ports.
-- `src/lib/classify.ts` — sorts each listener into a group: dev server, database, container, app or system
+- `src/lib/classify.ts` sorts each listener into a group: dev server, database, container, app or system
   (ControlCenter, rapportd, launchd, systemd, Windows services…).
-- `src/lib/known.ts` — a small curated knowledge base: AirPlay Receiver on 5000/7000, Continuity, Remote
+- `src/lib/known.ts` is a small list of owners Portlight recognises: AirPlay Receiver on 5000/7000, Continuity, Remote
   Login, Docker's port proxy, containers, Homebrew services, Figma Agent… For owners that the OS restarts
   (or where quitting would stop all of Docker), Quit is replaced by an explanation and, where there is
   one, the right command (`docker stop shop-db-1`, `brew services stop postgresql@16`).
-- `src/lib/view.ts` — hiding rules (`hideSystem`, `hiddenPorts`, `hiddenProcesses`), the badge count,
-  tab ↔ port mapping and idle detection. Pure functions, unit tested.
-- `src/lib/tabs.ts` — finds tabs open on `http://localhost`, `127.0.0.1`, `[::1]` and `*.localhost`. Clicking a port that
+- `src/lib/view.ts` holds the hiding rules (`hideSystem`, `hiddenPorts`, `hiddenProcesses`), the badge count,
+  tab-to-port mapping and idle detection. Pure functions, unit tested.
+- `src/lib/tabs.ts` finds tabs open on `http://localhost`, `127.0.0.1`, `[::1]` and `*.localhost`. Clicking a port that
   already has a tab switches to it (and its window) instead of opening a duplicate; tabs whose server
   has stopped get their own section with Switch and Close. No `tabs` permission: the existing host
   permissions are what let `tabs.query` match those URLs.
-- Settings come from `src/lib/settings.ts` (`chrome.storage.sync`). The popup applies them live, and
+- Settings come from `src/lib/settings.ts` (`chrome.storage.local`; older copies in `chrome.storage.sync` are migrated once). The popup applies them live, and
   caches them locally so the first paint already uses the right theme and hiding rules.
-- `src/lib/host.ts` — talks to the native host `com.portlight.host` using `shared/protocol.ts`.
-  The popup holds one `connectNative` port while open (measured: `list` 105 → 68 ms median,
-  `ping` 52 → 1 ms, and no process spawned every 2 s); the badge worker uses one-off
+- `src/lib/host.ts` talks to the native host `com.portlight.host` using `shared/protocol.ts`.
+  The popup holds one `connectNative` port while open (measured: `list` went from 105 to 68 ms median,
+  `ping` from 52 to 1 ms, and no process spawned every 2 s); the badge worker uses one-off
   `sendNativeMessage` calls so it never keeps the service worker alive.
 - `src/lib/platform.ts` has the "this Mac" or "this computer" wording, the extension IDs the installer
   knows (`EXTENSION_IDS`: the pinned dev ID, and an empty slot for the Chrome Web Store ID until it
   exists), and `installPlan()`, which builds the install commands for the popup and the options page.
   An ID the installer doesn't know, or a helper set up for another ID, gets `--extension-id <id>`.
-- `src/lib/meta.ts` — favicon and `<title>` of local web servers, fetched after the list paints (1.2 s timeout,
-  no redirects, same-origin icons only, ≤ 24 KB) and cached per port + pid in `localStorage`. The icon leads the
+- `src/lib/meta.ts` fetches the favicon and `<title>` of local web servers after the list paints (1.2 s timeout,
+  no redirects, same-origin icons only, at most 24 KB) and caches them per port + pid in `localStorage`. The icon leads the
   row's name; a title that says more than the folder (not "Vite + React + TS") replaces the process name.
-- `src/lib/phone.ts`, `src/lib/qr.ts` — "Open on Phone…": the host's LAN address (`netinfo`) as a QR code drawn by
+- `src/lib/phone.ts` and `src/lib/qr.ts` power "Open on Phone…": the host's LAN address (`netinfo`) as a QR code drawn by
   a small local encoder (no network, no dependency). Servers that only listen on localhost get the flag that
   exposes them instead (`--host` for Vite, `-H 0.0.0.0` for Next.js, …).
-- `src/lib/tunnels.ts` — "Share Public Link…": the popup asks the background worker, which owns the tunnel so it
+- `src/lib/tunnels.ts` runs "Share Public Link…". The popup asks the background worker, which owns the tunnel so it
   survives the popup closing. The worker keeps one `connectNative` port open only while a link runs (that also
   keeps the worker alive) and polls it every 5 s; when the last link stops, the helper exits. Rows with a live
   link show "Public". Without cloudflared/ngrok the panel shows the one-line install.
-- Idle cleanup — dev servers running longer than `idleAfterHours` with no tab (not hidden, not shared, not
+- Idle cleanup: dev servers running longer than `idleAfterHours` with no tab (not hidden, not shared, not
   containers or OS services) are offered as "Quit N Idle…" in the footer; one confirm quits them with their child
   processes.
 - `src/lib/probe.ts` is the fallback when the host is missing. The popup switches to it by itself, so
@@ -62,6 +62,9 @@ helper with `npx portlight-host install` (or Homebrew), which is what the popup 
   `extraProbePorts` and any port open in a tab over HTTP. Results are labelled "HTTP only"; databases and
   other non-HTTP services are invisible this way. AirPlay Receiver is recognised by its `Server: AirTunes`
   header and treated as a system port.
+- `scripts/finalize.mjs` writes `dist/manifest.json` and copies icons from `../assets/icons`.
+- `scripts/extension-id.mjs` and `scripts/keygen.mjs` handle the manifest `key`, which pins the
+  extension ID (see the root README).
 
 ### Without the helper
 
@@ -91,17 +94,16 @@ LNA as shipped and with `--enable-features=LocalNetworkAccessChecks:LocalNetwork
 the requests go through with no prompt, because the manifest's `http://localhost/*` and
 `http://127.0.0.1/*` host permissions cover them. No new permission is needed.
 `tests/e2e/lna.spec.ts` keeps checking it (fallback scan, direct fetch, tab linking) in both modes.
-- `scripts/finalize.mjs` — writes `dist/manifest.json` and copies icons from `../assets/icons`.
-- `scripts/extension-id.mjs`, `scripts/keygen.mjs` — the manifest `key` pins the extension ID
-  (see the root README).
 
 ## Motion
 
-The popup should feel like a macOS menu-bar extra that is quietly alive: things respond on the frame
-you act, move like physical objects, can be interrupted at any point, and never ask for attention.
+The popup should feel like a macOS menu-bar extra. Things respond on the frame you act, move like
+physical objects, can be interrupted at any point, and never ask for attention.
 `src/lib/motion.ts` holds the shared pieces; both stylesheets carry the same tokens.
 
-**Springs.** One model everywhere: Apple's damping ratio + response, sampled into CSS `linear()`
+### Springs
+
+Every spring uses Apple's damping ratio and response, sampled into CSS `linear()`
 (`springEasing()` computes the same curves for script-driven motion).
 
 | Token | Damping / response | Duration | Used for |
@@ -109,48 +111,54 @@ you act, move like physical objects, can be interrupted at any point, and never 
 | `--spring` / `SETTLE` | 1.0 / 0.35 s | 420 ms | rows moving, panels opening, entrances |
 | `QUICK` | 1.0 / 0.25 s | 300 ms | the row menu, small glyph swaps |
 | `--spring-pop` / `POP` | 0.72 / 0.38 s (~4 % overshoot) | 560 ms | completions only: copy check, QR code, a badge appearing |
-| `EXIT` | `cubic-bezier(.32,.72,0,1)` | 160–220 ms | anything leaving; exits are quicker than entrances and never bounce |
+| `EXIT` | `cubic-bezier(.32,.72,0,1)` | 160 to 220 ms | anything leaving; exits are quicker than entrances and never bounce |
 
-**What moves, and why.**
+### What moves, and why
 
-- *Harbor light (ambient).* Three soft lights (blue, a hint of violet or amber, teal) drift behind
+- Harbor light (ambient): three soft lights (blue, a hint of violet or amber, teal) drift behind
   the header on unrelated 31 / 43 / 53 s periods, so the pattern never visibly repeats; the options
   page has the same lights at page scale. Each is a pre-painted gradient that only moves by
   `transform`, stepped at 2 updates/s (eased by its keyframe stops): at ~5 px/s on a soft gradient the
   steps can't be seen, and the compositor draws twice a second instead of sixty times.
-- *Heartbeat.* The live dot breathes one ring when a fresh list has actually arrived, at most every
+- Heartbeat: the live dot breathes one ring when a fresh list has actually arrived, at most every
   ~6 s. It means "live", and nothing runs between beats. The options page beats once on connect.
-- *Busy.* While looking or scanning, a thin accent light sweeps along the header's bottom edge;
+- Busy: while looking or scanning, a thin accent light sweeps along the header's bottom edge;
   skeleton rows carry a sheen, row after row.
-- *Open.* The first list of the session cascades in (8 px rise + fade, 24 ms apart, at most ten
+- Open: the first list of the session cascades in (8 px rise + fade, 24 ms apart, at most ten
   steps, done in ~0.65 s); the footer fades in behind it; the lights fade up over 1.4 s. Rows are
   clickable from the first frame: only opacity and transform animate. The options page settles its
   hero and then each section, 35 ms apart.
-- *Live list.* On a refresh that adds, removes or reorders rows, every row slides from where it was
+- Live list: on a refresh that adds, removes or reorders rows, every row slides from where it was
   on screen to its new place (FLIP, `SETTLE`). A row that goes is lifted out of the flow where it is
   and fades (`EXIT`); one that comes in rises 6 px, waiting 90 ms if it takes a leaving row's place.
   A refresh that changes nothing reads no layout at all.
-- *Numbers.* The port count, the free-port suggestion, uptimes (minutes and up — a seconds count
+- Numbers: the port count, the free-port suggestion, uptimes (minutes and up, since a seconds count
   would roll every refresh) and the options stepper roll like an odometer: up when the number
   grows, down when it shrinks, low digits a beat later. The outgoing digit is drawn by CSS from
   `data-old`, so the element's text is always just the new value.
-- *Interaction.* Buttons scale to 0.97 (icons 0.92) on press. The row menu grows out of the ⋯ button
+- Interaction: buttons scale to 0.97 (icons 0.92) on press. The row menu grows out of the ⋯ button
   or the pointer (`QUICK`, from 0.94) and, on close, a copy fades out with the picked item still lit.
   Inline panels (Quit, explanations, phone, share, idle cleanup, options reset) open by growing their
   row with `--spring` while the content slides 6 px into place; when a panel's content changes while
-  open (finding the address → QR code), its height springs to the new size and the content
+  open (from finding the address to the QR code), its height springs to the new size and the content
   cross-fades. Badges that appear on a visible row (Public, tabs, Idle, Network) pop in. Errors
   shake once, decaying. Copy turns into a check with `POP` and back with a fade.
 
-**Interruptible.** CSS transitions retarget from their current value; FLIP measures where rows are
+### Interruptions
+
+CSS transitions retarget from their current value; FLIP measures where rows are
 on screen mid-slide, so a second change never jumps; a menu reopened while its last copy fades
 starts fresh; a panel resize starts from the current height.
 
-**Reduced motion.** `settings.motion` "system" follows `prefers-reduced-motion`, "full" ignores it,
+### Reduced motion
+
+`settings.motion` "system" follows `prefers-reduced-motion`, "full" ignores it,
 "reduced" forces it. Reduced: every loop stops (the lights stay, still), no heartbeat, no FLIP,
 rolls or cascades; panels and rows only fade. Loops also pause while the page is hidden.
 
-**Cost.** `npm run perf:motion` measures frame pacing on open and on a refresh with rows changing,
+### Cost
+
+`npm run perf:motion` measures frame pacing on open and on a refresh with rows changing,
 and CPU while the popup sits open for 10 s; `npm run record:motion` records the clips (needs ffmpeg) in
 `screenshots/motion/`. Screenshot tests run with Reduce Motion and transitions settled, so they
 never catch a frame mid-animation.

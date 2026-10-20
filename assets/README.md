@@ -25,7 +25,7 @@ transparency. The 16 and 32 px versions are separately drawn optical reductions:
 flat fills, stronger edges, a larger light and wider gaps, with coordinates chosen
 for each pixel grid. They are not downscales of the master.
 
-Store images composite the same approved artwork on graphite. “Portlight” is
+Store images composite the same approved artwork on graphite. "Portlight" is
 typeset in Helvetica Neue, then sampled from 2x for crisp edges; no generated text
 is used. Store PNGs are opaque RGB. `concepts/preview.png` shows all shipping icon
 sizes at 1:1 on light and dark backgrounds, plus nearest-neighbor detail views.
