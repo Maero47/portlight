@@ -1,61 +1,59 @@
 # Install the Portlight native messaging host on Windows (per user, no admin needed).
-#   powershell -ExecutionPolicy Bypass -File install.ps1 <extension-id> [<extension-id> ...]
-# Uninstall: powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+#
+#   powershell -ExecutionPolicy Bypass -File install.ps1 [<extension-id> ...] [-AllBrowsers]
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Status
+#
+# Checks for Node.js 18+ (and offers to install it with winget), then runs
+# `portlight-host install` from this folder, or from npm when run on its own.
 param(
   [switch]$Uninstall,
+  [switch]$Status,
+  [switch]$AllBrowsers,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$ExtensionIds
 )
 $ErrorActionPreference = "Stop"
-$HostName = "com.portlight.host"
-$InstallDir = Join-Path $env:LOCALAPPDATA "Portlight\host"
-$RegRoots = @(
-  "HKCU:\Software\Google\Chrome\NativeMessagingHosts",
-  "HKCU:\Software\Chromium\NativeMessagingHosts",
-  "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts",
-  "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts",
-  "HKCU:\Software\Vivaldi\NativeMessagingHosts"
-)
 
-if ($Uninstall) {
-  foreach ($root in $RegRoots) {
-    $key = Join-Path $root $HostName
-    if (Test-Path $key) { Remove-Item $key -Recurse; Write-Output "  removed    $key" }
+function Find-Node {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $null }
+  $major = [int](& $cmd.Source -p "process.versions.node.split('.')[0]")
+  if ($major -lt 18) { Write-Host "Found Node.js $major at $($cmd.Source), but Portlight needs 18 or newer."; return $null }
+  return $cmd.Source
+}
+
+$node = Find-Node
+if (-not $node) {
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host "Portlight needs Node.js 18 or newer. Install the LTS from https://nodejs.org, then run this again."
+    exit 1
   }
-  if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force; Write-Output "  removed    $InstallDir" }
-  exit 0
+  $answer = Read-Host "Portlight needs Node.js 18 or newer. Install it now with 'winget install OpenJS.NodeJS.LTS'? [Y/n]"
+  if ($answer -and $answer -notmatch '^[Yy]') {
+    Write-Host "Run 'winget install OpenJS.NodeJS.LTS', open a new terminal, then run this again."
+    exit 1
+  }
+  winget install --id OpenJS.NodeJS.LTS --exact --source winget --accept-source-agreements --accept-package-agreements
+  # winget updates PATH for new terminals only; pick it up here too.
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+  $node = Find-Node
+  if (-not $node) { Write-Host "Node.js was installed but isn't on PATH yet. Open a new terminal and run this again."; exit 1 }
 }
 
-if (-not $ExtensionIds) { Write-Error "usage: install.ps1 <extension-id> [...]"; exit 2 }
-foreach ($id in $ExtensionIds) {
-  if ($id -notmatch '^[a-p]{32}$') { Write-Error "'$id' is not a Chrome extension ID"; exit 2 }
+if ($Uninstall) { $cliArgs = @("uninstall") }
+elseif ($Status) { $cliArgs = @("status") }
+else {
+  $cliArgs = @("install")
+  foreach ($id in $ExtensionIds) { $cliArgs += @("--extension-id", $id) }
+  if ($AllBrowsers) { $cliArgs += "--all-browsers" }
 }
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $node) { Write-Error "node not found on PATH"; exit 1 }
 
-$src = $PSScriptRoot
-New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "src") | Out-Null
-Copy-Item (Join-Path $src "package.json") $InstallDir -Force
-Copy-Item (Join-Path $src "src\*.js") (Join-Path $InstallDir "src") -Force
-Write-Output "  wrote      $InstallDir (host files)"
-
-$launcher = Join-Path $InstallDir "portlight-host.bat"
-Set-Content -Path $launcher -Encoding ASCII -Value "@echo off`r`n`"$node`" `"%~dp0src\main.js`" %*"
-Write-Output "  wrote      $launcher"
-
-$manifestPath = Join-Path $InstallDir "$HostName.json"
-$manifest = [ordered]@{
-  name = $HostName
-  description = "Portlight: reports which localhost ports are in use"
-  path = $launcher
-  type = "stdio"
-  allowed_origins = @($ExtensionIds | ForEach-Object { "chrome-extension://$_/" })
+$main = Join-Path $PSScriptRoot "src\main.js"
+if (Test-Path $main) {
+  & $node $main @cliArgs
+} else {
+  $npx = Join-Path (Split-Path $node) "npx.cmd"
+  if (-not (Test-Path $npx)) { $npx = "npx" }
+  & $npx --yes portlight-host@latest @cliArgs
 }
-$manifest | ConvertTo-Json | Set-Content -Path $manifestPath -Encoding UTF8
-Write-Output "  wrote      $manifestPath"
-
-foreach ($root in $RegRoots) {
-  $key = Join-Path $root $HostName
-  New-Item -Path $key -Force | Out-Null
-  Set-Item -Path $key -Value $manifestPath
-  Write-Output "  wrote      $key"
-}
+exit $LASTEXITCODE

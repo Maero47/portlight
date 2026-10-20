@@ -1,11 +1,16 @@
 {
   "name": "portlight-host",
   "version": "0.1.0",
-  "description": "Native messaging host for the Portlight Chrome extension: reports TCP listeners on this machine.",
-  "private": true,
+  "description": "Native helper for the Portlight browser extension: shows which localhost ports are in use, and by which project.",
+  "keywords": ["portlight", "localhost", "ports", "native-messaging", "chrome-extension", "dev-server"],
   "type": "module",
   "bin": { "portlight-host": "src/main.js" },
+  "files": ["src/*.js", "scripts/frame.js", "install.ps1", "README.md"],
   "engines": { "node": ">=18" },
+  "os": ["darwin", "linux", "win32"],
+  "repository": { "type": "git", "url": "git+https://github.com/Maero47/LocalHoster.git", "directory": "host" },
+  "homepage": "https://github.com/Maero47/LocalHoster#readme",
+  "bugs": { "url": "https://github.com/Maero47/LocalHoster/issues" },
   "scripts": {
     "start": "node src/main.js",
     "test": "node --test"

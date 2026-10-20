@@ -1,24 +1,11 @@
 #!/bin/sh
 # Remove the Portlight native messaging host and its browser manifests (macOS / Linux).
+# Thin wrapper over `portlight-host uninstall`.
 set -eu
-
-HOST_NAME="com.portlight.host"
 SRC_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$SRC_DIR/scripts/browsers.sh"
-
-remove_one() {
-  f="$2/NativeMessagingHosts/$HOST_NAME.json"
-  if [ -f "$f" ]; then
-    rm -f "$f"
-    echo "  removed    $f"
-  fi
-}
-
-echo "Uninstalling Portlight host ($HOST_NAME)"
-for_each_browser remove_one
-if [ -d "$INSTALL_DIR" ]; then
-  rm -rf "$INSTALL_DIR"
-  echo "  removed    $INSTALL_DIR"
-  rmdir "$(dirname "$INSTALL_DIR")" 2>/dev/null || true
+NODE_BIN=${NODE:-$(command -v node || true)}
+if [ -z "$NODE_BIN" ]; then
+  echo "error: Node.js is required to run the uninstaller (https://nodejs.org)" >&2
+  exit 1
 fi
-echo "Done."
+exec "$NODE_BIN" "$SRC_DIR/src/main.js" uninstall

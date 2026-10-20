@@ -1,42 +1,63 @@
 # Portlight
 
-See which localhost ports are in use, by which project, and which are free — from a
+See which localhost ports are in use, by which project, and which are free, from a
 Chrome toolbar button.
 
 ![Portlight popup listing six dev servers with their projects and tools](assets/store/screenshot-1-ports-1280x800.png)
 
-- **Every listener:** port, project folder, recognised tool (Vite, Next.js, Uvicorn…), process and uptime.
-  Servers reachable from your network are marked.
-- **Type a port** to see whether it's free; the footer always offers the nearest free one.
-- **Quit** a stray dev server from the popup (asks first; only your own processes), or every idle one at once.
-- **Open on Phone** shows a QR code for your LAN address; **Share Public Link** starts a cloudflared (or ngrok)
+- Every listener, with its port, project folder, recognised tool (Vite, Next.js, Uvicorn…), process and
+  uptime. Servers reachable from your network are marked.
+- Type a port to see whether it's free; the footer always offers the nearest free one.
+- Quit a stray dev server from the popup (it asks first, and only for your own processes), or every idle one
+  at once.
+- Open on Phone shows a QR code for your LAN address. Share Public Link starts a cloudflared (or ngrok)
   tunnel when one is installed.
 
 Works in Chrome, Chromium, Brave, Edge, Arc and Vivaldi on macOS, Linux and Windows.
 
 ## Install
 
-You need [Node.js](https://nodejs.org) 18 or newer.
-
-1. In this folder, run:
+1. Add Portlight to your browser from the Chrome Web Store.
+2. Install the small helper it uses to read ports. You need
+   [Node.js](https://nodejs.org) 18 or newer.
 
    ```sh
-   ./install.sh
+   npx portlight-host install
    ```
 
-   It builds the extension and installs the small helper Portlight uses to read ports.
-2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and pick
-   `extension/dist`.
+   On macOS or Linux you can use Homebrew instead:
 
-That's it. The extension ID is fixed, so the order of the two steps doesn't matter and
-you never need to copy an ID. After pulling updates, run `./install.sh` again and click
-the reload arrow on the Portlight card.
+   ```sh
+   brew install maero47/tap/portlight-host
+   portlight-host install
+   ```
 
-Uninstall: `./install.sh --uninstall`, then remove the extension.
+3. Open the Portlight popup. If it was already open, close it and open it again.
 
-**Windows:** build with `cd extension && npm ci && npm run build`, then run
-`powershell -ExecutionPolicy Bypass -File host\install.ps1 mfnkpeccejhabclngfmkadokknojffeo`
-and load `extension\dist` as above.
+On Windows without Node.js, run `winget install OpenJS.NodeJS.LTS` first, then open a
+new terminal for step 2.
+
+The helper registers itself with every Chromium browser it finds and needs no admin
+rights. `portlight-host status` shows what is installed and whether it works, and
+`portlight-host uninstall` removes it. More in the [helper's README](host/README.md).
+
+### From source
+
+To run the extension from this repository on macOS or Linux:
+
+```sh
+./install.sh
+```
+
+It builds the extension and installs the helper for it. Then open `chrome://extensions`,
+turn on Developer mode, click Load unpacked and pick `extension/dist`. The unpacked build
+has a fixed ID, so the order of the two steps doesn't matter. After pulling updates, run
+`./install.sh` again and click the reload arrow on the Portlight card. To uninstall, run
+`./install.sh --uninstall` and remove the extension.
+
+On Windows, build with `cd extension && npm ci && npm run build`, run
+`powershell -ExecutionPolicy Bypass -File host\install.ps1`, and load `extension\dist`
+the same way.
 
 ## How it works
 
@@ -49,9 +70,9 @@ messaging helper over stdin/stdout ([protocol](shared/protocol.ts)). While the p
 open it keeps one helper process and asks it for the list every two seconds; the helper
 exits when the popup closes. The toolbar badge is refreshed every 30 seconds.
 
-- [`extension/`](extension/README.md) — Manifest V3 popup and badge worker (TypeScript, no framework)
-- [`host/`](host/README.md) — the helper: `lsof` on macOS, `ss` or `/proc` on Linux, `netstat` on Windows
-- [`assets/`](assets/README.md) — icons and store artwork
+- [`extension/`](extension/README.md): Manifest V3 popup and badge worker (TypeScript, no framework)
+- [`host/`](host/README.md): the helper, using `lsof` on macOS, `ss` or `/proc` on Linux, `netstat` on Windows
+- [`assets/`](assets/README.md): icons and store artwork
 
 Without the helper, the popup can still knock on common dev ports over HTTP, clearly
 labelled "HTTP only".
@@ -60,19 +81,19 @@ labelled "HTTP only".
 
 Nothing leaves your computer. There is no account, analytics or remote server.
 
-- The helper only reads local socket and process tables, and only answers this extension
-  (its manifest lists this extension's ID and nothing else).
+- The helper only reads local socket and process tables, and only answers Portlight
+  (its manifest lists Portlight's extension IDs and nothing else).
 - The extension's only web access is `http://localhost`, `127.0.0.1`, `[::1]` and `*.localhost`: the HTTP
   fallback, tab linking, and each local server's favicon and page title.
-- **Share Public Link** is the one exception, and only when you click it: it exposes that server to anyone with
+- Share Public Link is the one exception, and only when you click it: it exposes that server to anyone with
   the link through Cloudflare (or ngrok) until you stop it, the server stops, or the browser quits.
 - Quitting a process asks first, and the helper refuses anything that isn't yours or isn't
-  holding a listening port — including the browser itself.
+  holding a listening port, and never touches the browser itself.
 
 ## Development
 
 ```sh
-cd host && npm test                      # parsers, handler, installer, a real TCP server
+cd host && npm test                      # parsers, handler, installer on every OS, a real TCP server
 cd extension && npm test                 # unit tests + popup against a mocked helper
 cd extension && npm run test:e2e:real    # real install, real helper, real servers in Chromium
 cd extension && npm run store:shots      # regenerate assets/store/screenshot-*.png
@@ -92,5 +113,17 @@ node extension/scripts/keygen.mjs --from path/to/portlight-extension.pem   # res
 node extension/scripts/keygen.mjs                                           # new key pair = new ID
 ```
 
-A new ID means everyone re-runs `./install.sh`. The Chrome Web Store assigns its own ID;
-`./install.sh <store-id>` allows that one too.
+A new ID means everyone re-runs `./install.sh`. The Chrome Web Store assigns its own ID
+on the first upload. Put it in `host/src/ids.js` and publish a new `portlight-host`, so
+`npx portlight-host install` allows it by default. Until then, `./install.sh <store-id>`
+or `portlight-host install --extension-id <store-id>` allows it on one machine.
+
+### Releasing the helper
+
+```sh
+cd host && npm publish                  # publishes portlight-host to npm
+packaging/homebrew/bump.sh              # point the formula at the new version
+```
+
+Then copy `packaging/homebrew/portlight-host.rb` to `Formula/` in the `maero47/homebrew-tap`
+repository. See [packaging/homebrew](packaging/homebrew/README.md).

@@ -1,4 +1,4 @@
-// Runs install.sh / uninstall.sh against a throwaway HOME.
+// Runs the install.sh / uninstall.sh wrappers against a throwaway HOME.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_EXTENSION_IDS } from "../src/ids.js";
 
 const DIR = fileURLToPath(new URL("..", import.meta.url));
 const ID = "abcdefghijklmnopabcdefghijklmnop";
@@ -31,7 +32,7 @@ test("install.sh is idempotent, reports what it wrote, and uninstall.sh removes 
     const first = execFileSync(path.join(DIR, "install.sh"), [ID], { env, encoding: "utf8" });
     assert.match(first, new RegExp(`wrote +${manifestPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    assert.deepEqual(manifest.allowed_origins, [`chrome-extension://${ID}/`]);
+    assert.deepEqual(manifest.allowed_origins, [...DEFAULT_EXTENSION_IDS, ID].map((id) => `chrome-extension://${id}/`));
     assert.equal(manifest.name, "com.portlight.host");
     assert.equal(manifest.type, "stdio");
     assert.equal(manifest.path, path.join(installDir, "portlight-host"));
