@@ -169,3 +169,20 @@ test("no heartbeat with Reduce Motion", async ({ page }) => {
   await page.waitForTimeout(1200);
   expect(await beats(page)).toBe(0);
 });
+
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`focus survives two neighbouring rows leaving together (${reducedMotion})`, async ({ page }) => {
+    // Ungrouped, the list ends …8000, 8787, 44950. The last two stop in the same refresh while
+    // 8787 has focus: focus must land on 8000, not bounce between the two leaving rows to <body>.
+    await openPopup(page, { reducedMotion, settings: { groupRows: false, refreshMs: 500 } });
+    await expect(page.locator("li.row")).toHaveCount(10);
+    await expect(page.locator("li.row .port").last()).toHaveText("44950");
+    await page.locator('li.row[data-key^="8787:"] .row-main').focus();
+    await page.evaluate(() => (window as any).__mutate((l: any[]) => l.filter((x) => x.port !== 8787 && x.port !== 44950)));
+    await expect(page.locator("li.row:not(.leaving)")).toHaveCount(8);
+    await expect(page.locator('li.row[data-key^="8000:"] .row-main')).toBeFocused();
+    // Still there once the leaving rows are gone from the DOM.
+    await expect(page.locator("li.leaving")).toHaveCount(0);
+    await expect(page.locator('li.row[data-key^="8000:"] .row-main')).toBeFocused();
+  });
+}

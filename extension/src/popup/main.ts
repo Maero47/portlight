@@ -1253,6 +1253,8 @@ function nextRowMain(el: HTMLElement): HTMLElement | null {
  * screen and fades there, while the rows around it slide into place (see renderList's FLIP).
  */
 function removeEls(els: HTMLLIElement[], animate: boolean) {
+  // Mark every row that goes first, so focus never moves onto a neighbour that is leaving too.
+  for (const el of els) el.classList.add("leaving");
   for (const el of els) if (el.contains(document.activeElement)) (nextRowMain(el) ?? input).focus({ preventScroll: true });
   if (!animate || reducedMotion()) {
     els.forEach((el) => el.remove());
@@ -1266,7 +1268,6 @@ function removeEls(els: HTMLLIElement[], animate: boolean) {
   });
   for (const { el, top, left, width } of boxes) {
     cancel(el, "flip");
-    el.classList.add("leaving");
     Object.assign(el.style, { position: "absolute", top: `${top}px`, left: `${left}px`, width: `${width}px`, margin: "0" });
     const a = play(el, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.97)" }], { ...EXIT, duration: 160, fill: "forwards" });
     if (a) a.finished.then(() => el.remove(), () => el.remove());
