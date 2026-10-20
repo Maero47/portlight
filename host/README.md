@@ -24,9 +24,9 @@ portlight-host install
 
 Then reload the Portlight extension (or reopen its popup).
 
-This version of the helper doesn't know the Chrome Web Store build's ID yet. If you
-installed Portlight from the store, the popup shows the install command with
-`--extension-id <id>` already filled in. You can also copy the ID from
+The helper allows the Chrome Web Store build and the unpacked build from this
+repository. For any other build (one you packed yourself, say), the popup shows the
+install command with `--extension-id <id>` filled in. You can also copy the ID from
 `chrome://extensions` and run:
 
 ```sh
@@ -185,8 +185,7 @@ Replace `node src/main.js` with the launcher path `portlight-host status` prints
 the installed copy.
 
 The extension IDs the installer allows by default live in `src/ids.js`: the pinned ID of
-the unpacked build, and a slot for the Chrome Web Store ID to fill in after the first
-upload.
+the unpacked build and the Chrome Web Store ID.
 
 Parsers are tested against captured `lsof`, `ss`, `/proc`, `netstat`, `tasklist`,
 `docker ps` and `podman ps` output in `test/fixtures`. The installer tests run every

@@ -4,11 +4,8 @@
 /** Unpacked builds: pinned by the public `key` in extension/src/manifest.json. */
 export const DEV_EXTENSION_ID = "mfnkpeccejhabclngfmkadokknojffeo";
 
-/**
- * Chrome Web Store build. The store assigns this ID on the first upload; paste it here
- * (32 letters a-p, shown in the developer dashboard) and publish a new host version.
- */
-export const STORE_EXTENSION_ID = "";
+/** Chrome Web Store build (the ID the store assigned on the first upload). */
+export const STORE_EXTENSION_ID = "khdojfoihgghehobdalaonjocjmolfjk";
 
 export const DEFAULT_EXTENSION_IDS = [DEV_EXTENSION_ID, STORE_EXTENSION_ID].filter(Boolean);
 

@@ -42,8 +42,8 @@ helper with `npx portlight-host install` (or Homebrew), which is what the popup 
   `ping` from 52 to 1 ms, and no process spawned every 2 s); the badge worker uses one-off
   `sendNativeMessage` calls so it never keeps the service worker alive.
 - `src/lib/platform.ts` has the "this Mac" or "this computer" wording, the extension IDs the installer
-  knows (`EXTENSION_IDS`: the pinned dev ID, and an empty slot for the Chrome Web Store ID until it
-  exists), and `installPlan()`, which builds the install commands for the popup and the options page.
+  knows (`EXTENSION_IDS`: the pinned dev ID and the Chrome Web Store ID), and `installPlan()`, which builds the install
+  commands for the popup and the options page.
   An ID the installer doesn't know, or a helper set up for another ID, gets `--extension-id <id>`.
 - `src/lib/meta.ts` fetches the favicon and `<title>` of local web servers after the list paints (1.2 s timeout,
   no redirects, same-origin icons only, at most 24 KB) and caches them per port + pid in `localStorage`. The icon leads the

@@ -24,8 +24,8 @@ export function yourDevices(os: Os = detectOs()): string {
 export const EXTENSION_IDS = {
   /** The unpacked build from the repo; the manifest "key" pins it (scripts/extension-id.mjs). */
   dev: "mfnkpeccejhabclngfmkadokknojffeo",
-  /** Chrome Web Store listing. Not known until the first upload: fill it in then. */
-  store: "",
+  /** Chrome Web Store listing. */
+  store: "khdojfoihgghehobdalaonjocjmolfjk",
 } as const;
 
 export function isKnownId(id: string): boolean {

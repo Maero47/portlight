@@ -115,10 +115,9 @@ node extension/scripts/keygen.mjs --from path/to/portlight-extension.pem   # res
 node extension/scripts/keygen.mjs                                           # new key pair = new ID
 ```
 
-A new ID means everyone re-runs `./install.sh`. The Chrome Web Store assigns its own ID
-on the first upload. Put it in `host/src/ids.js` and publish a new `portlight-host`, so
-`npx portlight-host install` allows it by default. Until then, `./install.sh <store-id>`
-or `portlight-host install --extension-id <store-id>` allows it on one machine.
+A new ID means everyone re-runs `./install.sh`. The Chrome Web Store build has its own
+ID, `khdojfoihgghehobdalaonjocjmolfjk`, which the helper allows by default (see
+`host/src/ids.js`).
 
 ### Releasing the helper
 

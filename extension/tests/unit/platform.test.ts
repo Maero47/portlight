@@ -30,9 +30,10 @@ describe("known extension IDs", () => {
   it("the dev ID is the one the manifest key pins", () => {
     expect(DEV).toBe(pinnedExtensionId());
   });
-  it("an empty store slot never matches", () => {
+  it("knows the dev and store IDs, and never matches an empty ID", () => {
     expect(isKnownId("")).toBe(false);
     expect(isKnownId(DEV)).toBe(true);
+    expect(isKnownId("khdojfoihgghehobdalaonjocjmolfjk")).toBe(true);
     expect(isKnownId(OTHER)).toBe(false);
   });
 });
