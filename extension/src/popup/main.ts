@@ -37,6 +37,7 @@ import { exposeHint, phoneUrl } from "../lib/phone.ts";
 import { qrSvg } from "../lib/qr.ts";
 import { tunnelRequest, type TunnelReply } from "../lib/tunnels.ts";
 import type { LanAddress, Listener, SettingsPane, Tunnel, TunnelProvider } from "../../../shared/protocol.ts";
+import { EXIT, QUICK, SETTLE, cancel, flip, heartbeat, measure, play, popIn, riseIn, roll, setReducedMotion, shake, sleepWhenHidden } from "../lib/motion.ts";
 
 type Mode = "loading" | "host" | "missing" | "fallback" | "error";
 type CheckState = "free" | "used" | "pending" | "unknown";
@@ -140,10 +141,13 @@ function announce(text: string) {
   requestAnimationFrame(() => (a.textContent = text));
 }
 
+const reduceQuery = matchMedia("(prefers-reduced-motion: reduce)");
 function reducedMotion(): boolean {
   const m = state.settings.motion;
-  return m === "reduced" || (m === "system" && matchMedia("(prefers-reduced-motion: reduce)").matches);
+  return m === "reduced" || (m === "system" && reduceQuery.matches);
 }
+setReducedMotion(reducedMotion);
+sleepWhenHidden();
 
 for (const el of document.querySelectorAll<HTMLElement>("[data-icon]")) {
   const name = el.dataset.icon as keyof typeof icon;
@@ -243,6 +247,8 @@ function flashDone(btn: HTMLElement, glyphHost: HTMLElement = btn, size = 14) {
       btn.classList.remove("done");
       glyphHost.innerHTML = restoreGlyph.get(glyphHost) ?? icon.copy(size);
       restoreGlyph.delete(glyphHost);
+      const g = glyphHost.querySelector("svg");
+      if (g) play(g, [{ opacity: 0, transform: "scale(0.85)" }, { opacity: 1, transform: "none" }], { ...QUICK, fill: "backwards" });
     }, 1400),
   );
 }
@@ -355,6 +361,7 @@ function refresh(): Promise<void> {
       inflight = null;
     }
     render({ animate: true });
+    beat();
     void updateCheck();
     void updateSuggestion();
     scheduleMeta();
@@ -407,6 +414,7 @@ async function scanFallback(first = false) {
   state.rows = found.filter((r) => seen.has(r.port)).sort((a, b) => a.port - b.port);
   state.scanning = false;
   render({ animate: true });
+  beat();
   scheduleMeta();
   void updateSuggestion();
   fallbackTimer = setTimeout(() => void scanFallback(), FALLBACK_RESCAN_MS);
@@ -923,7 +931,10 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
   set(".name", name);
   li.querySelector(".name")!.classList.toggle("unknown", unknown);
   set(".tool", tool);
-  set(".uptime", uptime ?? "");
+  const upEl = li.querySelector<HTMLElement>(".uptime")!;
+  // Minutes and hours roll; a seconds count would roll every refresh, which is just noise.
+  if (li.isConnected && !/^\d+s$/.test(uptime ?? "")) roll(upEl, uptime ?? "");
+  else if (upEl.textContent !== (uptime ?? "")) upEl.textContent = upEl.dataset.roll = uptime ?? "";
   li.classList.toggle("is-hidden", !!hidden);
   li.classList.toggle("stopped", r.source === "tab");
   li.classList.toggle("linked", tabs.length > 0 && r.source !== "tab");
@@ -986,7 +997,18 @@ function updateRow(li: HTMLLIElement, r: PortRow, hidden: HiddenReason | null) {
       tabsHtml +
       idleHtml;
   }
-  setHtml(li.querySelector<HTMLElement>(".line2")!, line2);
+  const line2El = li.querySelector<HTMLElement>(".line2")!;
+  const before = line2El.dataset.html;
+  setHtml(line2El, line2);
+  // A badge that appears on a row already on screen (a tab opened, sharing started, gone idle) pops in.
+  if (before !== undefined && before !== line2 && li.isConnected) {
+    for (const cls of ["shared", "tabs", "idle", "scope network"]) {
+      if (line2.includes(`class="${cls}"`) && !before.includes(`class="${cls}"`)) {
+        const el = line2El.querySelector(`.${cls.replace(" ", ".")}`);
+        if (el) popIn(el, 0.7);
+      }
+    }
+  }
 
   if (r.source === "tab") {
     main.setAttribute("aria-label", `Port ${r.port}, ${name}. Server stopped, ${tabWord} still open. Switch to tab.`);
@@ -1179,7 +1201,21 @@ function renderConfirm(li: HTMLLIElement, r: PortRow) {
   }
   // Live panels re-render in place; keep focus where it was unless the panel just opened.
   const hadFocus = box.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.act : undefined;
+  const inner = box.parentElement!;
+  const swapping = !!prevPhase && !reducedMotion();
+  const h0 = swapping ? inner.getBoundingClientRect().height : 0;
   box.innerHTML = html;
+  if (swapping) {
+    const h1 = inner.getBoundingClientRect().height;
+    cancel(inner, "resize");
+    if (h0 > 0 && Math.abs(h1 - h0) > 1) {
+      const a = play(inner, [{ height: `${h0}px` }, { height: `${h1}px` }], SETTLE);
+      if (a) a.id = "resize";
+    }
+    play(box, [{ opacity: 0, transform: "translateY(2px)" }, { opacity: 1, transform: "none" }], { duration: 240, easing: "ease-out" });
+  }
+  const err = box.querySelector(".confirm-text.error");
+  if (err) shake(err);
   // Taller panels can open below the fold: bring the whole row into view once it has grown.
   if (c.phase === "phone" || c.phase === "share" || c.phase === "info") {
     setTimeout(() => {
@@ -1212,21 +1248,34 @@ function nextRowMain(el: HTMLElement): HTMLElement | null {
   return null;
 }
 
-function removeEl(el: HTMLLIElement, animate: boolean) {
-  if (el.contains(document.activeElement)) (nextRowMain(el) ?? input).focus({ preventScroll: true });
+/**
+ * Take rows out of the list. Animated, each one is lifted out of the flow exactly where it is on
+ * screen and fades there, while the rows around it slide into place (see renderList's FLIP).
+ */
+function removeEls(els: HTMLLIElement[], animate: boolean) {
+  for (const el of els) if (el.contains(document.activeElement)) (nextRowMain(el) ?? input).focus({ preventScroll: true });
   if (!animate || reducedMotion()) {
-    el.remove();
+    els.forEach((el) => el.remove());
     return;
   }
-  el.classList.add("leaving");
-  el.style.height = `${el.offsetHeight}px`;
-  el.style.overflow = "hidden";
-  el.style.transition = "opacity 180ms ease, transform 260ms var(--ease-out), height 280ms var(--ease-out) 80ms";
-  requestAnimationFrame(() => (el.style.height = "0px"));
-  setTimeout(() => el.remove(), 420);
+  // All reads, then all writes.
+  const base = list.getBoundingClientRect();
+  const boxes = els.map((el) => {
+    const r = el.getBoundingClientRect();
+    return { el, top: r.top - base.top, left: r.left - base.left, width: r.width };
+  });
+  for (const { el, top, left, width } of boxes) {
+    cancel(el, "flip");
+    el.classList.add("leaving");
+    Object.assign(el.style, { position: "absolute", top: `${top}px`, left: `${left}px`, width: `${width}px`, margin: "0" });
+    const a = play(el, [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "scale(0.97)" }], { ...EXIT, duration: 160, fill: "forwards" });
+    if (a) a.finished.then(() => el.remove(), () => el.remove());
+    else el.remove();
+  }
 }
 
 let firstPaint = true;
+let lastOrder = "";
 
 function createAux(item: Exclude<Item, { kind: "row" }>): HTMLLIElement {
   if (item.kind === "header") return h("li", { class: "section-label", role: "presentation", "data-key": item.key });
@@ -1252,18 +1301,29 @@ function updateAux(li: HTMLLIElement, item: Exclude<Item, { kind: "row" }>) {
 function renderList(items: Item[], animate: boolean) {
   const keepRows = new Set(items.filter((i) => i.kind === "row").map((i) => i.key));
   const keepAux = new Set(items.filter((i) => i.kind !== "row").map((i) => i.key));
+  const calm = reducedMotion();
+  // The first list of the session arrives as a quick cascade; later changes slide (FLIP).
+  const intro = firstPaint && keepRows.size > 0 && !calm;
+  const order = items.map((i) => i.key).join("|");
+  const moving = animate && !firstPaint && !calm && order !== lastOrder;
+  lastOrder = order;
+  // Only when something is added, removed or reordered: a plain refresh reads no layout at all.
+  const before = moving ? measure(list.querySelectorAll<HTMLElement>(":scope > li:not(.leaving):not(.skeleton)")) : null;
+  const leaving: HTMLLIElement[] = [];
   for (const [key, el] of rowEls) {
     if (!keepRows.has(key)) {
       rowEls.delete(key);
-      removeEl(el, animate);
+      leaving.push(el);
     }
   }
   for (const [key, el] of auxEls) {
     if (!keepAux.has(key)) {
       auxEls.delete(key);
-      el.remove();
+      leaving.push(el);
     }
   }
+  removeEls(leaving, animate);
+  const arriving: HTMLLIElement[] = [];
   let prev: HTMLLIElement | null = null;
   for (const item of items) {
     let el: HTMLLIElement | undefined;
@@ -1272,11 +1332,7 @@ function renderList(items: Item[], animate: boolean) {
       if (!el) {
         el = createRow(item.row);
         rowEls.set(item.key, el);
-        if (animate && !firstPaint && !reducedMotion()) {
-          el.classList.add("entering");
-          const node = el;
-          requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("entering")));
-        }
+        arriving.push(el);
       }
       updateRow(el, item.row, item.hidden);
     } else {
@@ -1284,6 +1340,7 @@ function renderList(items: Item[], animate: boolean) {
       if (!el) {
         el = createAux(item);
         auxEls.set(item.key, el);
+        arriving.push(el);
       }
       updateAux(el, item);
     }
@@ -1292,6 +1349,22 @@ function renderList(items: Item[], animate: boolean) {
     while (anchor && anchor !== el && (anchor as HTMLElement).classList?.contains("leaving")) anchor = anchor.nextSibling;
     if (anchor !== el) list.insertBefore(el, anchor);
     prev = el;
+  }
+  if (before) {
+    for (const el of leaving) before.delete(el);
+    flip(before);
+  }
+  if (intro) {
+    // 24 ms apart, at most ten steps: the whole list is in place within ~0.65 s, and every row is
+    // clickable from the first frame (only opacity and transform animate).
+    let i = 0;
+    for (const el of list.children) {
+      if (!arriving.includes(el as HTMLLIElement)) continue;
+      riseIn(el, 8, Math.min(i++, 10) * 24);
+    }
+  } else if (animate && !firstPaint) {
+    // A row taking a leaving row's place waits until that one has mostly faded, so they never overlap.
+    for (const el of arriving) riseIn(el, 6, leaving.length && !reducedMotion() ? 90 : 0);
   }
   if (keepRows.size) firstPaint = false;
 }
@@ -1487,8 +1560,8 @@ function renderChrome() {
     default:
       text = "Unavailable";
   }
-  const st = $("status-text");
-  if (st.textContent !== text) st.textContent = text;
+  setStatus(text);
+  app.dataset.busy = String(state.mode === "loading" || state.scanning);
 
   const wrap = $("search-wrap");
   wrap.classList.toggle("has-text", !!state.query);
@@ -1506,6 +1579,33 @@ function renderChrome() {
     banner.hidden = true;
     banner.dataset.html = "";
   }
+}
+
+/** The live dot breathes when a fresh list has just arrived (not on a timer of its own). */
+function beat() {
+  if (app.dataset.live === "on" || app.dataset.live === "http") heartbeat(document.querySelector(".live-dot")!);
+}
+
+/** "10 ports in use": the number rolls when it changes, the words just follow. */
+function setStatus(text: string) {
+  const st = $("status-text");
+  const m = /^(\d+)(\D.*)$/.exec(text);
+  let count = st.querySelector<HTMLElement>(".count");
+  if (m && count) {
+    roll(count, m[1]!);
+    const rest = st.querySelector<HTMLElement>(".rest")!;
+    if (rest.textContent !== m[2]) rest.textContent = m[2]!;
+    return;
+  }
+  if (st.textContent === text) return;
+  if (m) {
+    count = h("span", { class: "count" });
+    count.textContent = count.dataset.roll = m[1]!;
+    const rest = h("span", { class: "rest" });
+    rest.textContent = m[2]!;
+    st.replaceChildren(count, rest);
+  } else st.textContent = text;
+  play(st, [{ opacity: 0, transform: "translateY(2px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "ease-out" });
 }
 
 function renderCheck() {
@@ -1565,7 +1665,7 @@ function renderFooter() {
   const port = state.suggestion;
   const portEl = $("suggest-port");
   const txt = port ? String(port) : "—";
-  if (portEl.textContent !== txt) portEl.textContent = txt;
+  roll(portEl, txt);
   pill.disabled = !port;
   const near = queryPort();
   $("suggest-label").textContent =
@@ -1624,6 +1724,8 @@ function renderSweep() {
       <button class="btn destructive" type="button" data-act="sweep-quit"${pending ? " disabled" : ""}>Quit ${n}</button>`;
   }
   content.innerHTML = `${head}${items ? `<ul class="sweep-list">${items}</ul>` : ""}<div class="confirm-row end">${actions}</div>`;
+  const err = content.querySelector(".sweep-title.error");
+  if (err) shake(err);
   if (sw.phase !== "pending") {
     const target = content.querySelector<HTMLElement>('[data-act="sweep-quit"]') ?? content.querySelector<HTMLElement>('[data-act="sweep-cancel"]');
     requestAnimationFrame(() => content.dataset.sig === sig && target?.focus({ preventScroll: true }));
@@ -1720,10 +1822,11 @@ function openMenu(key: string, at?: { x: number; y: number }) {
   y = Math.max(8, y);
   menuEl.style.left = `${x}px`;
   menuEl.style.top = `${y}px`;
-  menuEl.style.transformOrigin = `${at ? "left" : "right"} ${y < anchor.top ? "bottom" : "top"}`;
-  menuEl.classList.remove("in");
-  void menuEl.offsetWidth;
-  menuEl.classList.add("in");
+  // Grows out of the ⋯ button (or the pointer), like a macOS menu.
+  menuEl.style.transformOrigin = at ? `${at.x - x}px ${at.y - y}px` : `${anchor.left + anchor.width / 2 - x}px ${y < anchor.top ? "100%" : "0"}`;
+  cancel(menuEl, "menu");
+  const a = play(menuEl, [{ opacity: 0, transform: "scale(0.94)" }, { opacity: 1, transform: "none" }], QUICK);
+  if (a) a.id = "menu";
   menuEl.querySelector<HTMLElement>(".menu-item")?.focus({ preventScroll: true });
 }
 
@@ -1731,12 +1834,36 @@ function closeMenu(refocus = true) {
   const key = state.menu?.key;
   if (!key) return;
   state.menu = null;
+  fadeOutMenu();
   menuEl.hidden = true;
   menuEl.innerHTML = "";
   const li = rowEls.get(key);
   li?.classList.remove("menu-open");
   li?.querySelector('[data-act="menu"]')?.setAttribute("aria-expanded", "false");
   if (refocus) li?.querySelector<HTMLElement>(".row-main")?.focus({ preventScroll: true });
+}
+
+/**
+ * The menu closes at once (focus and state move on), and a copy of it fades out on top: the
+ * picked item stays lit while it goes, as in macOS. Starts from wherever an opening animation was.
+ */
+function fadeOutMenu() {
+  if (reducedMotion() || menuEl.hidden) return;
+  const items = [...menuEl.querySelectorAll(".menu-item")];
+  const picked = items.indexOf(document.activeElement as Element);
+  const { opacity, transform } = getComputedStyle(menuEl);
+  const ghost = menuEl.cloneNode(true) as HTMLElement;
+  ghost.removeAttribute("id");
+  ghost.removeAttribute("role");
+  ghost.setAttribute("aria-hidden", "true");
+  ghost.inert = true;
+  ghost.classList.add("ghost");
+  if (picked >= 0) ghost.querySelectorAll(".menu-item")[picked]?.classList.add("picked");
+  document.body.append(ghost);
+  cancel(menuEl, "menu");
+  const a = play(ghost, [{ opacity, transform: transform === "none" ? "none" : transform }, { opacity: 0, transform: "scale(0.98)" }], { ...EXIT, duration: 160, fill: "forwards" });
+  if (a) a.finished.then(() => ghost.remove(), () => ghost.remove());
+  else ghost.remove();
 }
 
 async function runMenuAction(act: string, key: string) {

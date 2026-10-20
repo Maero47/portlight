@@ -3,3 +3,4 @@ dist/
 test-results/
 playwright-report/
 .real-e2e/
+screenshots/motion/.raw/

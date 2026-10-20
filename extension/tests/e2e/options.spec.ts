@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { DEFAULT_SETTINGS, type Settings } from "../../src/lib/settings.ts";
-import { DIST, ORIGIN, PINNED_ID, SHOTS } from "./harness.ts";
+import { DIST, ORIGIN, PINNED_ID, SHOTS, settleTransitions } from "./harness.ts";
 
 // The options page against a mocked chrome.storage (local, plus sync for migration) and native host.
 mkdirSync(SHOTS, { recursive: true });
@@ -16,9 +16,9 @@ type Host = "connected" | "missing" | "forbidden";
 
 async function openOptions(
   page: Page,
-  opts: { scheme?: "light" | "dark"; host?: Host; stored?: unknown; storedSync?: unknown } = {},
+  opts: { scheme?: "light" | "dark"; host?: Host; stored?: unknown; storedSync?: unknown; reducedMotion?: "reduce" | "no-preference" } = {},
 ) {
-  const { scheme = "light", host = "connected", stored, storedSync } = opts;
+  const { scheme = "light", host = "connected", stored, storedSync, reducedMotion = "reduce" } = opts;
   const errors: string[] = [];
   page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -27,7 +27,8 @@ async function openOptions(
     if (!file.startsWith(DIST) || !existsSync(file)) return route.fulfill({ status: 404, body: "" });
     return route.fulfill({ status: 200, body: readFileSync(file), contentType: TYPES[extname(file)] ?? "application/octet-stream" });
   });
-  await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
+  await page.emulateMedia({ colorScheme: scheme, reducedMotion });
+  if (reducedMotion === "reduce") await settleTransitions(page);
   await page.addInitScript(mockChrome, { host, stored: stored ?? null, storedSync: storedSync ?? null, id: PINNED_ID, key: KEY });
   await page.goto(`${ORIGIN}/options.html`);
   await expect(page.locator("#page")).toHaveAttribute("aria-busy", "false");
@@ -449,4 +450,38 @@ test("an invalid half-typed port writes nothing on close", async ({ page }) => {
   const { ops, stored: s } = await typeThenClose(page, "#preferred", "0");
   expect(ops).toEqual([]);
   expect(s).toBeUndefined();
+});
+
+const optionLoops = (page: Page) =>
+  page.evaluate(() =>
+    document.getAnimations().filter((a) => a.playState === "running" && a.effect?.getComputedTiming().iterations === Infinity).length,
+  );
+
+test("motion: the harbor light drifts with full motion and stops when motion is reduced", async ({ page }) => {
+  await openOptions(page, { reducedMotion: "no-preference" });
+  // The three harbor lights.
+  await expect.poll(() => optionLoops(page)).toBeGreaterThanOrEqual(3);
+  await page.locator('label:has(input[name="motion"][value="reduced"])').click();
+  await expect(page.locator("html")).toHaveAttribute("data-motion", "reduced");
+  await expect.poll(() => optionLoops(page)).toBe(0);
+});
+
+test("motion: Reduce Motion (system) means no loops on the options page", async ({ page }) => {
+  await openOptions(page);
+  await page.waitForTimeout(100);
+  expect(await optionLoops(page)).toBe(0);
+});
+
+test("motion: the idle stepper rolls its number and always reads the new value", async ({ page }) => {
+  await openOptions(page, { reducedMotion: "no-preference" });
+  const value = page.locator("#idle-value");
+  const before = await value.textContent();
+  await page.waitForTimeout(300);
+  await page.locator('.stepper-arrows [data-step="1"]').click();
+  const after = await value.textContent();
+  expect(after).not.toBe(before);
+  // Mid-roll the outgoing digit is drawn by CSS only; the text is already the new value.
+  await expect(value).toHaveText(after!);
+  await expect(value.locator(".dg")).toHaveCount(0);
+  await expect(value).toHaveText(after!);
 });

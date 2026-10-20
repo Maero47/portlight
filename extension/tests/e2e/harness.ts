@@ -4,7 +4,8 @@ import type { Page } from "@playwright/test";
 import { pinnedExtensionId } from "../../scripts/extension-id.mjs";
 
 export const ORIGIN = "https://portlight.test";
-export const DIST = resolve(import.meta.dirname, "../../dist");
+/** PORTLIGHT_DIST lets the perf runs serve another build (e.g. a baseline) through the same mocks. */
+export const DIST = process.env.PORTLIGHT_DIST ?? resolve(import.meta.dirname, "../../dist");
 export const SHOTS = resolve(import.meta.dirname, "../../screenshots");
 
 const TYPES: Record<string, string> = {
@@ -45,6 +46,25 @@ export interface MockTunnel {
 }
 export const PINNED_ID = pinnedExtensionId();
 
+/**
+ * Screenshot tests run with Reduce Motion on, where the popup still fades (short CSS transitions:
+ * focus rings, hover). Turning transitions off makes every shot land on the settled frame instead
+ * of somewhere in a 140 ms fade, so re-running the suite doesn't churn the PNGs.
+ */
+export async function settleTransitions(page: Page) {
+  await page.addInitScript(() => {
+    const css = "*, *::before, *::after { transition: none !important; }";
+    const add = () => {
+      const style = document.createElement("style");
+      style.dataset.test = "settle";
+      style.textContent = css;
+      (document.head ?? document.documentElement).append(style);
+    };
+    if (document.documentElement) add();
+    else document.addEventListener("DOMContentLoaded", add, { once: true });
+  });
+}
+
 /** Serve the built extension from a fake origin and stub chrome.* with a mocked native host. */
 export async function openPopup(
   page: Page,
@@ -61,9 +81,11 @@ export async function openPopup(
     lan?: MockOptions["lan"];
     /** Favicons (SVG markup) per port, linked from the page that port serves. */
     favicons?: Record<number, string>;
+    /** Screenshots and most tests run with Reduce Motion on, so nothing is caught mid-animation. */
+    reducedMotion?: "reduce" | "no-preference";
   } = {},
 ) {
-  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID, settings, tabs, oldHost, respawn, tunnel, favicons = {} } = opts;
+  const { scenario = "list", scheme = "light", httpPorts = {}, id = PINNED_ID, settings, tabs, oldHost, respawn, tunnel, favicons = {}, reducedMotion = "reduce" } = opts;
   const lan = opts.lan === undefined ? [{ name: "en0", address: "192.168.1.23", family: "IPv4" as const, virtual: false }] : opts.lan;
   const errors: string[] = [];
   page.on("console", (m) => {
@@ -96,7 +118,8 @@ export async function openPopup(
     });
   });
 
-  await page.emulateMedia({ colorScheme: scheme, reducedMotion: "reduce" });
+  await page.emulateMedia({ colorScheme: scheme, reducedMotion });
+  if (reducedMotion === "reduce") await settleTransitions(page);
   await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn, tunnel, lan } satisfies MockOptions);
   await page.goto(`${ORIGIN}/popup.html`);
   return { errors };

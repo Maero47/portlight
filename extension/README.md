@@ -8,6 +8,8 @@ npm run build          # → dist/, load it via chrome://extensions → "Load un
 npm test               # unit tests (Vitest) + build + popup tests against a mocked host
 npm run test:e2e:real  # ../install.sh into a temp HOME, real host, real servers (macOS/Linux)
 npm run store:shots    # ../assets/store/screenshot-*.png from the real popup
+npm run perf:motion    # frame pacing and idle CPU of the popup's motion (see Motion)
+npm run record:motion  # screenshots/motion/*.mp4
 ```
 
 First run of the Playwright tests needs a browser: `npx playwright install chromium`.
@@ -66,6 +68,66 @@ the requests go through with no prompt, because the manifest's `http://localhost
 - `scripts/finalize.mjs` — writes `dist/manifest.json` and copies icons from `../assets/icons`.
 - `scripts/extension-id.mjs`, `scripts/keygen.mjs` — the manifest `key` pins the extension ID
   (see the root README).
+
+## Motion
+
+The popup should feel like a macOS menu-bar extra that is quietly alive: things respond on the frame
+you act, move like physical objects, can be interrupted at any point, and never ask for attention.
+`src/lib/motion.ts` holds the shared pieces; both stylesheets carry the same tokens.
+
+**Springs.** One model everywhere: Apple's damping ratio + response, sampled into CSS `linear()`
+(`springEasing()` computes the same curves for script-driven motion).
+
+| Token | Damping / response | Duration | Used for |
+| --- | --- | --- | --- |
+| `--spring` / `SETTLE` | 1.0 / 0.35 s | 420 ms | rows moving, panels opening, entrances |
+| `QUICK` | 1.0 / 0.25 s | 300 ms | the row menu, small glyph swaps |
+| `--spring-pop` / `POP` | 0.72 / 0.38 s (~4 % overshoot) | 560 ms | completions only: copy check, QR code, a badge appearing |
+| `EXIT` | `cubic-bezier(.32,.72,0,1)` | 160–220 ms | anything leaving; exits are quicker than entrances and never bounce |
+
+**What moves, and why.**
+
+- *Harbor light (ambient).* Three soft lights (blue, a hint of violet or amber, teal) drift behind
+  the header on unrelated 31 / 43 / 53 s periods, so the pattern never visibly repeats; the options
+  page has the same lights at page scale. Each is a pre-painted gradient that only moves by
+  `transform`, stepped at 2 updates/s (eased by its keyframe stops): at ~5 px/s on a soft gradient the
+  steps can't be seen, and the compositor draws twice a second instead of sixty times.
+- *Heartbeat.* The live dot breathes one ring when a fresh list has actually arrived, at most every
+  ~6 s. It means "live", and nothing runs between beats. The options page beats once on connect.
+- *Busy.* While looking or scanning, a thin accent light sweeps along the header's bottom edge;
+  skeleton rows carry a sheen, row after row.
+- *Open.* The first list of the session cascades in (8 px rise + fade, 24 ms apart, at most ten
+  steps, done in ~0.65 s); the footer fades in behind it; the lights fade up over 1.4 s. Rows are
+  clickable from the first frame: only opacity and transform animate. The options page settles its
+  hero and then each section, 35 ms apart.
+- *Live list.* On a refresh that adds, removes or reorders rows, every row slides from where it was
+  on screen to its new place (FLIP, `SETTLE`). A row that goes is lifted out of the flow where it is
+  and fades (`EXIT`); one that comes in rises 6 px, waiting 90 ms if it takes a leaving row's place.
+  A refresh that changes nothing reads no layout at all.
+- *Numbers.* The port count, the free-port suggestion, uptimes (minutes and up — a seconds count
+  would roll every refresh) and the options stepper roll like an odometer: up when the number
+  grows, down when it shrinks, low digits a beat later. The outgoing digit is drawn by CSS from
+  `data-old`, so the element's text is always just the new value.
+- *Interaction.* Buttons scale to 0.97 (icons 0.92) on press. The row menu grows out of the ⋯ button
+  or the pointer (`QUICK`, from 0.94) and, on close, a copy fades out with the picked item still lit.
+  Inline panels (Quit, explanations, phone, share, idle cleanup, options reset) open by growing their
+  row with `--spring` while the content slides 6 px into place; when a panel's content changes while
+  open (finding the address → QR code), its height springs to the new size and the content
+  cross-fades. Badges that appear on a visible row (Public, tabs, Idle, Network) pop in. Errors
+  shake once, decaying. Copy turns into a check with `POP` and back with a fade.
+
+**Interruptible.** CSS transitions retarget from their current value; FLIP measures where rows are
+on screen mid-slide, so a second change never jumps; a menu reopened while its last copy fades
+starts fresh; a panel resize starts from the current height.
+
+**Reduced motion.** `settings.motion` "system" follows `prefers-reduced-motion`, "full" ignores it,
+"reduced" forces it. Reduced: every loop stops (the lights stay, still), no heartbeat, no FLIP,
+rolls or cascades; panels and rows only fade. Loops also pause while the page is hidden.
+
+**Cost.** `npm run perf:motion` measures frame pacing on open and on a refresh with rows changing,
+and CPU while the popup sits open for 10 s; `npm run record:motion` records the clips (needs ffmpeg) in
+`screenshots/motion/`. Screenshot tests run with Reduce Motion and transitions settled, so they
+never catch a frame mid-animation.
 
 ## Keyboard
 

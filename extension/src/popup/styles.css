@@ -32,11 +32,23 @@
   --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
-  /* Critically damped spring (damping 1.0, response 0.35s) sampled for CSS. */
+  /* Motion tokens. Springs use Apple's damping + response model, sampled for CSS (lib/motion.ts
+     computes the same curves for script-driven motion). A critically damped curve has one shape,
+     so a shorter duration is simply a quicker response.
+     --spring: damping 1.0, response 0.35 s (420 ms). Panels, rows, entrances.
+     --spring-pop: damping 0.72, response 0.38 s (560 ms, ~4 % overshoot). Completions only. */
   --spring: linear(0, 0.082, 0.243, 0.413, 0.562, 0.682, 0.774, 0.841, 0.89, 0.925, 0.949, 0.965, 0.977, 0.984, 0.99, 0.993, 1);
   --spring-dur: 420ms;
+  --spring-pop: linear(0, 0.047, 0.158, 0.299, 0.448, 0.587, 0.71, 0.811, 0.89, 0.949, 0.989, 1.016, 1.031, 1.037, 1.038, 1.035, 1.031, 1.025, 1.019, 1.014, 1.01, 1.006, 1.003, 1.001, 1, 0.999, 0.999, 0.999, 1);
+  --spring-pop-dur: 560ms;
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --fast: 140ms;
+
+  /* Harbor light: the ambient glow behind the header. Low alpha, so it tints rather than shines. */
+  --glow-a: rgba(0, 113, 227, 0.13);
+  --glow-b: rgba(175, 82, 222, 0.07);
+  --glow-c: rgba(48, 176, 199, 0.1);
+  --sheen: rgba(255, 255, 255, 0.65);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -62,6 +74,10 @@
     --focus: rgba(10, 132, 255, 0.7);
     --shadow-raised: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3);
     --code-bg: #242426;
+    --glow-a: rgba(10, 132, 255, 0.2);
+    --glow-b: rgba(255, 159, 10, 0.09);
+    --glow-c: rgba(100, 210, 255, 0.11);
+    --sheen: rgba(255, 255, 255, 0.07);
   }
 }
 
@@ -88,6 +104,10 @@
   --focus: rgba(10, 132, 255, 0.7);
   --shadow-raised: 0 0 0 0.5px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.3);
   --code-bg: #242426;
+  --glow-a: rgba(10, 132, 255, 0.2);
+  --glow-b: rgba(255, 159, 10, 0.09);
+  --glow-c: rgba(100, 210, 255, 0.11);
+  --sheen: rgba(255, 255, 255, 0.07);
 }
 
 :root[data-theme="light"] {
@@ -171,13 +191,76 @@ kbd.keycap {
 /* ---------- layout ---------- */
 
 .app {
+  position: relative;
   height: 100%;
   display: flex;
   flex-direction: column;
+  isolation: isolate;
 }
 
 .app > * {
   flex: none;
+  position: relative;
+}
+
+/* ---------- ambient: harbor light ----------
+   Three soft lights drift behind the header on long, unrelated periods (31 s, 43 s, 53 s), so the
+   pattern never visibly repeats. Each light is a pre-painted gradient on its own layer that only
+   moves (transform), so the compositor animates it without touching the main thread.
+   The drift is ~5 px/s, so it is stepped at 2 updates/s (eased by the keyframe stops): on a soft
+   gradient the steps are invisible, and the compositor only draws when something moved, instead of
+   60 times a second. Paused while the popup is hidden; still (but kept) when motion is reduced. */
+.ambient {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 260px;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(#000 35%, transparent);
+  mask-image: linear-gradient(#000 35%, transparent);
+  animation: lights-on 1.4s var(--ease-out) both;
+}
+
+.glow {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+}
+
+.glow.a {
+  width: 300px;
+  height: 220px;
+  left: -90px;
+  top: -120px;
+  background: radial-gradient(closest-side, var(--glow-a), transparent);
+  animation: drift-a 31s steps(16, jump-none) infinite alternate both;
+}
+
+.glow.b {
+  width: 240px;
+  height: 200px;
+  right: -80px;
+  top: -110px;
+  background: radial-gradient(closest-side, var(--glow-b), transparent);
+  animation: drift-b 43s steps(22, jump-none) infinite alternate both;
+}
+
+.glow.c {
+  width: 260px;
+  height: 160px;
+  left: 60px;
+  top: -70px;
+  background: radial-gradient(closest-side, var(--glow-c), transparent);
+  animation: drift-c 53s steps(26, jump-none) -20s infinite alternate both;
+}
+
+.asleep .glow,
+.asleep .live-dot::after,
+.asleep .chrome::after,
+.asleep .sk::after {
+  /* !important: the loops' own shorthands are more specific and would reset it. */
+  animation-play-state: paused !important;
 }
 
 .app > .body {
@@ -194,6 +277,24 @@ kbd.keycap {
 
 .app.scrolled .chrome {
   box-shadow: 0 0.5px 0 var(--hairline);
+}
+
+/* Looking / scanning: a thin light sweeps along the header's bottom edge. */
+.chrome::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0;
+  transform: translateX(-120px);
+  pointer-events: none;
+}
+
+.app[data-busy="true"] .chrome::after {
+  animation: scan-sweep 1.6s cubic-bezier(0.45, 0, 0.25, 1) 300ms infinite;
 }
 
 .titlebar {
@@ -220,11 +321,45 @@ kbd.keycap {
 }
 
 .live-dot {
+  position: relative;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--label-3);
   transition: background-color 300ms ease;
+}
+
+/* Live: a soft ring breathes out of the dot each time fresh data lands (heartbeat() in lib/motion.ts). */
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0;
+}
+
+/* Rolling digits (lib/motion.ts roll()): the old digit is drawn from data-old and rolls away. */
+.dg {
+  display: inline-block;
+  -webkit-mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent);
+  mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent);
+}
+
+.dg-in {
+  position: relative;
+  display: inline-block;
+}
+
+.dg-in::after {
+  content: attr(data-old);
+  position: absolute;
+  left: 0;
+  top: -100%;
+}
+
+.dg-in.down::after {
+  top: 100%;
 }
 
 .app[data-live="on"] .live-dot {
@@ -295,6 +430,10 @@ kbd.keycap {
 
 .search .clear:hover {
   background: var(--label-2);
+}
+
+.search .clear:not([hidden]) {
+  animation: pop 320ms var(--spring) both;
 }
 
 .search:focus-within .keycap,
@@ -476,22 +615,21 @@ kbd.keycap {
   letter-spacing: 0.01em;
 }
 
+.rows {
+  position: relative;
+}
+
 .row {
   position: relative;
   display: grid;
   border-radius: 10px;
-  transition: background-color var(--fast) ease, opacity 220ms ease, transform var(--spring-dur) var(--spring);
+  transition: background-color var(--fast) ease;
 }
 
-.row.entering {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.row.leaving {
-  opacity: 0;
-  transform: scale(0.98);
+/* Rows and headers on their way out (lifted out of the flow by removeEls()). */
+.leaving {
   pointer-events: none;
+  z-index: 0;
 }
 
 .row-main {
@@ -685,8 +823,9 @@ kbd.keycap {
 }
 
 .icon-btn.done .glyph,
-.suggest-pill.done .glyph {
-  animation: pop 320ms var(--spring) both;
+.suggest-pill.done .glyph,
+.btn .bglyph .glyph {
+  animation: pop var(--spring-pop-dur) var(--spring-pop) both;
 }
 
 /* Inline kill confirmation: grows under the row with the same spring. */
@@ -711,12 +850,14 @@ kbd.keycap {
   gap: 8px;
   padding: 2px 8px 10px 82px;
   opacity: 0;
-  transition: opacity 200ms ease;
+  transform: translateY(-6px);
+  transition: opacity 200ms ease, transform var(--spring-dur) var(--spring);
 }
 
 .row.confirming .confirm-content {
   opacity: 1;
-  transition-delay: 60ms;
+  transform: none;
+  transition-delay: 60ms, 0ms;
 }
 
 .confirm-text {
@@ -761,10 +902,33 @@ kbd.keycap {
 }
 
 .sk {
+  position: relative;
+  overflow: hidden;
   height: 10px;
   border-radius: 5px;
   background: var(--fill);
-  animation: breathe 1.6s ease-in-out infinite;
+}
+
+/* A sheen passes over the placeholders, row after row. */
+.sk::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--sheen), transparent);
+  transform: translateX(-100%);
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+.skeleton:nth-child(2) .sk::after {
+  animation-delay: 90ms;
+}
+
+.skeleton:nth-child(3) .sk::after {
+  animation-delay: 180ms;
+}
+
+.skeleton:nth-child(4) .sk::after {
+  animation-delay: 270ms;
 }
 
 .sk.port-sk {
@@ -798,6 +962,38 @@ kbd.keycap {
   margin-bottom: 14px;
   color: var(--label-2);
   background: var(--fill);
+  animation: pop var(--spring-pop-dur) var(--spring-pop) both;
+}
+
+.state > h2,
+.state > p,
+.state > .actions-row,
+.onboard-head > h2,
+.onboard-head > p,
+.onboard .step,
+.onboard-actions,
+.onboard-note {
+  animation: rise-in var(--spring-dur) var(--spring) both;
+  animation-delay: 60ms;
+}
+
+.state > p,
+.onboard-head > p {
+  animation-delay: 100ms;
+}
+
+.state > .actions-row,
+.onboard .step:nth-child(1) {
+  animation-delay: 140ms;
+}
+
+.onboard .step:nth-child(2) {
+  animation-delay: 180ms;
+}
+
+.onboard-actions,
+.onboard-note {
+  animation-delay: 220ms;
 }
 
 .state h2 {
@@ -949,6 +1145,7 @@ kbd.keycap {
 /* ---------- footer ---------- */
 
 .footer {
+  animation: fade 360ms ease-out 140ms both;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1219,8 +1416,19 @@ kbd.keycap {
   font-size: 13px;
 }
 
-.menu.in {
-  animation: menu-in 160ms var(--ease-out) both;
+/* The copy that fades out after the menu closes (fadeOutMenu()). */
+.menu.ghost {
+  pointer-events: none;
+}
+
+.menu.ghost .menu-item.picked {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.menu.ghost .menu-item.danger.picked {
+  background: var(--red);
+  color: #fff;
 }
 
 .menu-item {
@@ -1363,6 +1571,7 @@ code.inline {
   background: #fff;
   box-shadow: 0 0 0 0.5px var(--hairline), var(--shadow-raised);
   line-height: 0;
+  animation: materialize var(--spring-pop-dur) var(--spring-pop) both;
 }
 
 .qr-frame .qr {
@@ -1433,12 +1642,14 @@ code.inline {
   padding: 12px 14px 12px;
   box-shadow: 0 -0.5px 0 var(--hairline);
   opacity: 0;
-  transition: opacity 200ms ease;
+  transform: translateY(6px);
+  transition: opacity 200ms ease, transform var(--spring-dur) var(--spring);
 }
 
 .sweep.open .sweep-content {
   opacity: 1;
-  transition-delay: 60ms;
+  transform: none;
+  transition-delay: 60ms, 0ms;
 }
 
 .sweep-title {
@@ -1512,13 +1723,6 @@ code.inline {
 
 /* ---------- motion ---------- */
 
-@keyframes menu-in {
-  from {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-}
-
 
 @keyframes rise {
   from {
@@ -1535,38 +1739,138 @@ code.inline {
 
 @keyframes pop {
   0% {
-    transform: scale(0.6);
+    transform: scale(0.5);
     opacity: 0;
   }
 }
 
-@keyframes breathe {
-  50% {
-    opacity: 0.45;
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
   }
 }
 
+@keyframes materialize {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes scan-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-120px);
+  }
+  20%,
+  80% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(360px);
+  }
+}
+
+@keyframes lights-on {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes drift-a {
+  0% {
+    transform: translate3d(0.0px, 0.0px, 0) scale(1.000);
+  }
+  25% {
+    transform: translate3d(22.0px, 3.8px, 0) scale(1.026);
+  }
+  50% {
+    transform: translate3d(75.0px, 13.0px, 0) scale(1.090);
+  }
+  75% {
+    transform: translate3d(128.0px, 22.2px, 0) scale(1.154);
+  }
+  100% {
+    transform: translate3d(150.0px, 26.0px, 0) scale(1.180);
+  }
+}
+
+@keyframes drift-b {
+  0% {
+    transform: translate3d(0.0px, 0.0px, 0) scale(1.100);
+  }
+  25% {
+    transform: translate3d(-19.0px, 5.0px, 0) scale(1.074);
+  }
+  50% {
+    transform: translate3d(-65.0px, 17.0px, 0) scale(1.010);
+  }
+  75% {
+    transform: translate3d(-111.0px, 29.0px, 0) scale(0.946);
+  }
+  100% {
+    transform: translate3d(-130.0px, 34.0px, 0) scale(0.920);
+  }
+}
+
+@keyframes drift-c {
+  0% {
+    transform: translate3d(-40.0px, 0.0px, 0) scale(0.900);
+  }
+  25% {
+    transform: translate3d(-21.0px, 2.6px, 0) scale(0.932);
+  }
+  50% {
+    transform: translate3d(25.0px, 9.0px, 0) scale(1.010);
+  }
+  75% {
+    transform: translate3d(71.0px, 15.4px, 0) scale(1.088);
+  }
+  100% {
+    transform: translate3d(90.0px, 18.0px, 0) scale(1.120);
+  }
+}
+
+/* Reduced motion: every loop stops (the harbor light stays, still), springs become short fades,
+   and script-driven motion (lib/motion.ts) is skipped entirely. */
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) *,
   :root:not([data-motion="full"]) *::before,
   :root:not([data-motion="full"]) *::after {
     animation-duration: 1ms !important;
     animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
   }
-  .row,
-  .actions,
-  .confirm,
-  .sweep {
+  :root:not([data-motion="full"]) .glow,
+  :root:not([data-motion="full"]) .live-dot::after,
+  :root:not([data-motion="full"]) .chrome::after,
+  :root:not([data-motion="full"]) .sk::after {
+    animation: none !important;
+  }
+  :root:not([data-motion="full"]) .row,
+  :root:not([data-motion="full"]) .actions,
+  :root:not([data-motion="full"]) .confirm,
+  :root:not([data-motion="full"]) .confirm-content,
+  :root:not([data-motion="full"]) .sweep,
+  :root:not([data-motion="full"]) .sweep-content {
     transition-property: opacity, background-color !important;
   }
-  .row.entering,
-  .row.leaving,
-  .actions {
+  :root:not([data-motion="full"]) .actions,
+  :root:not([data-motion="full"]) .confirm-content,
+  :root:not([data-motion="full"]) .sweep-content {
     transform: none !important;
   }
-  .btn:active,
-  .icon-btn:active,
-  .suggest-pill:active {
+  :root:not([data-motion="full"]) .btn:active,
+  :root:not([data-motion="full"]) .icon-btn:active,
+  :root:not([data-motion="full"]) .suggest-pill:active {
     transform: none;
   }
 }
@@ -1577,16 +1881,25 @@ code.inline {
 :root[data-motion="reduced"] *::after {
   animation-duration: 1ms !important;
   animation-iteration-count: 1 !important;
+  animation-delay: 0ms !important;
+}
+:root[data-motion="reduced"] .glow,
+:root[data-motion="reduced"] .live-dot::after,
+:root[data-motion="reduced"] .chrome::after,
+:root[data-motion="reduced"] .sk::after {
+  animation: none !important;
 }
 :root[data-motion="reduced"] .row,
 :root[data-motion="reduced"] .actions,
 :root[data-motion="reduced"] .confirm,
-:root[data-motion="reduced"] .sweep {
+:root[data-motion="reduced"] .confirm-content,
+:root[data-motion="reduced"] .sweep,
+:root[data-motion="reduced"] .sweep-content {
   transition-property: opacity, background-color !important;
 }
-:root[data-motion="reduced"] .row.entering,
-:root[data-motion="reduced"] .row.leaving,
-:root[data-motion="reduced"] .actions {
+:root[data-motion="reduced"] .actions,
+:root[data-motion="reduced"] .confirm-content,
+:root[data-motion="reduced"] .sweep-content {
   transform: none !important;
 }
 :root[data-motion="reduced"] .btn:active,

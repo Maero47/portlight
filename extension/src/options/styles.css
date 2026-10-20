@@ -39,6 +39,12 @@
   /* Critically damped spring (damping 1.0, response 0.35s) sampled for CSS. */
   --spring: linear(0, 0.082, 0.243, 0.413, 0.562, 0.682, 0.774, 0.841, 0.89, 0.925, 0.949, 0.965, 0.977, 0.984, 0.99, 0.993, 1);
   --spring-dur: 420ms;
+  /* Damping 0.72, response 0.38 s (~4 % overshoot), for completions. Same model as lib/motion.ts. */
+  --spring-pop: linear(0, 0.047, 0.158, 0.299, 0.448, 0.587, 0.71, 0.811, 0.89, 0.949, 0.989, 1.016, 1.031, 1.037, 1.038, 1.035, 1.031, 1.025, 1.019, 1.014, 1.01, 1.006, 1.003, 1.001, 1, 0.999, 0.999, 0.999, 1);
+  --spring-pop-dur: 560ms;
+  --glow-a: rgba(0, 113, 227, 0.12);
+  --glow-b: rgba(175, 82, 222, 0.07);
+  --glow-c: rgba(48, 176, 199, 0.09);
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --fast: 140ms;
 }
@@ -71,6 +77,9 @@
     --shadow-group: 0 0 0 0.5px rgba(255, 255, 255, 0.06);
     --code-bg: #232325;
     --toolbar: rgba(28, 28, 30, 0.78);
+    --glow-a: rgba(10, 132, 255, 0.18);
+    --glow-b: rgba(255, 159, 10, 0.08);
+    --glow-c: rgba(100, 210, 255, 0.1);
   }
 }
 
@@ -100,6 +109,9 @@
   --shadow-group: 0 0 0 0.5px rgba(255, 255, 255, 0.06);
   --code-bg: #232325;
   --toolbar: rgba(28, 28, 30, 0.78);
+  --glow-a: rgba(10, 132, 255, 0.18);
+  --glow-b: rgba(255, 159, 10, 0.08);
+  --glow-c: rgba(100, 210, 255, 0.1);
 }
 
 * {
@@ -175,11 +187,19 @@ button {
   background: var(--toolbar);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   backdrop-filter: saturate(180%) blur(20px);
-  transition: box-shadow var(--fast) ease;
+  transition: box-shadow var(--fast) ease, background-color 200ms ease;
 }
 
 .toolbar.scrolled {
   box-shadow: 0 0.5px 0 var(--hairline);
+}
+
+/* At the top the toolbar is clear, so the harbor light runs up under it; the material only
+   appears once content scrolls beneath (a scroll-edge effect, as in macOS). */
+.toolbar:not(.scrolled) {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .toolbar-inner {
@@ -215,12 +235,70 @@ button {
 }
 
 .saved-glyph {
+  display: inline-flex;
   color: var(--green);
+}
+
+.saved.show .saved-glyph {
+  animation: pop var(--spring-pop-dur) var(--spring-pop) both;
+}
+
+/* ---------- ambient: harbor light (same lights as the popup, scaled to the page) ---------- */
+
+.ambient {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 420px;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(#000 30%, transparent);
+  mask-image: linear-gradient(#000 30%, transparent);
+  animation: fade 1.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.glow {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+}
+
+.glow.a {
+  width: 560px;
+  height: 360px;
+  left: calc(50% - 520px);
+  top: -200px;
+  background: radial-gradient(closest-side, var(--glow-a), transparent);
+  animation: drift-a 37s steps(18, jump-none) infinite alternate both;
+}
+
+.glow.b {
+  width: 440px;
+  height: 320px;
+  left: calc(50% + 80px);
+  top: -190px;
+  background: radial-gradient(closest-side, var(--glow-b), transparent);
+  animation: drift-b 47s steps(24, jump-none) infinite alternate both;
+}
+
+.glow.c {
+  width: 480px;
+  height: 260px;
+  left: calc(50% - 200px);
+  top: -140px;
+  background: radial-gradient(closest-side, var(--glow-c), transparent);
+  animation: drift-c 59s steps(30, jump-none) -24s infinite alternate both;
+}
+
+.asleep .glow,
+.asleep .status-dot::after {
+  /* !important: the loops' own shorthands are more specific and would reset it. */
+  animation-play-state: paused !important;
 }
 
 /* ---------- page ---------- */
 
 .page {
+  position: relative;
   max-width: 640px;
   margin: 0 auto;
   padding: 8px 20px 56px;
@@ -256,6 +334,31 @@ button {
 .group-wrap {
   margin-bottom: 24px;
 }
+
+/* Page load: the hero settles, then each section rises in, 35 ms apart. */
+.hero,
+.group-wrap {
+  animation: rise-in 520ms var(--spring) both;
+}
+
+.app-icon {
+  animation: icon-in var(--spring-pop-dur) var(--spring-pop) both;
+}
+
+@keyframes icon-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+}
+
+.group-wrap:nth-child(2) { animation-delay: 40ms; }
+.group-wrap:nth-child(3) { animation-delay: 75ms; }
+.group-wrap:nth-child(4) { animation-delay: 110ms; }
+.group-wrap:nth-child(5) { animation-delay: 145ms; }
+.group-wrap:nth-child(6) { animation-delay: 180ms; }
+.group-wrap:nth-child(7) { animation-delay: 215ms; }
+.group-wrap:nth-child(n + 8) { animation-delay: 250ms; }
 
 .group-title {
   margin: 0 0 7px;
@@ -889,6 +992,22 @@ label.row {
   background: var(--green);
 }
 
+/* Connected: one breath, like the popup's live dot (heartbeat() in lib/motion.ts). */
+.status-dot {
+  position: relative;
+}
+
+.status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0;
+}
+
+
+
 #helper[data-state="missing"] .status-dot,
 #helper[data-state="error"] .status-dot {
   background: var(--orange);
@@ -965,12 +1084,14 @@ label.row {
   gap: 8px;
   padding: 0 12px 12px;
   opacity: 0;
-  transition: opacity 180ms ease;
+  transform: translateY(-6px);
+  transition: opacity 180ms ease, transform var(--spring-dur) var(--spring);
 }
 
 #reset[data-state="confirming"] .confirm-content {
   opacity: 1;
-  transition-delay: 60ms;
+  transform: none;
+  transition-delay: 60ms, 0ms;
 }
 
 .confirm-text {
@@ -999,6 +1120,101 @@ label.row {
   }
 }
 
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+}
+
+@keyframes drift-a {
+  0% {
+    transform: translate3d(0.0px, 0.0px, 0) scale(1.000);
+  }
+  25% {
+    transform: translate3d(32.2px, 4.4px, 0) scale(1.022);
+  }
+  50% {
+    transform: translate3d(110.0px, 15.0px, 0) scale(1.075);
+  }
+  75% {
+    transform: translate3d(187.8px, 25.6px, 0) scale(1.128);
+  }
+  100% {
+    transform: translate3d(220.0px, 30.0px, 0) scale(1.150);
+  }
+}
+
+@keyframes drift-b {
+  0% {
+    transform: translate3d(0.0px, 0.0px, 0) scale(1.080);
+  }
+  25% {
+    transform: translate3d(-29.3px, 5.9px, 0) scale(1.057);
+  }
+  50% {
+    transform: translate3d(-100.0px, 20.0px, 0) scale(1.000);
+  }
+  75% {
+    transform: translate3d(-170.7px, 34.1px, 0) scale(0.943);
+  }
+  100% {
+    transform: translate3d(-200.0px, 40.0px, 0) scale(0.920);
+  }
+}
+
+@keyframes drift-c {
+  0% {
+    transform: translate3d(-60.0px, 0.0px, 0) scale(0.900);
+  }
+  25% {
+    transform: translate3d(-30.7px, 3.5px, 0) scale(0.932);
+  }
+  50% {
+    transform: translate3d(40.0px, 12.0px, 0) scale(1.010);
+  }
+  75% {
+    transform: translate3d(110.7px, 20.5px, 0) scale(1.088);
+  }
+  100% {
+    transform: translate3d(140.0px, 24.0px, 0) scale(1.120);
+  }
+}
+
+/* Rolling digits (lib/motion.ts roll()). */
+.dg {
+  display: inline-block;
+  -webkit-mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent);
+  mask-image: linear-gradient(transparent, #000 22%, #000 78%, transparent);
+}
+
+.dg-in {
+  position: relative;
+  display: inline-block;
+}
+
+.dg-in::after {
+  content: attr(data-old);
+  position: absolute;
+  left: 0;
+  top: -100%;
+}
+
+.dg-in.down::after {
+  top: 100%;
+}
+
+.field-error:not([hidden]) {
+  animation: rise-in 300ms var(--spring) both;
+}
+
 @keyframes token-in {
   from {
     opacity: 0;
@@ -1019,6 +1235,11 @@ label.row {
 }
 
 /* "Reduced" in Motion, or "System" with Reduce Motion on. */
+:root[data-motion="reduced"] .glow,
+:root[data-motion="reduced"] .status-dot::after {
+  animation: none !important;
+}
+
 :root[data-motion="reduced"] *,
 :root[data-motion="reduced"] *::before,
 :root[data-motion="reduced"] *::after {
@@ -1026,9 +1247,14 @@ label.row {
   animation-iteration-count: 1 !important;
   transition-duration: 1ms !important;
   transition-delay: 0ms !important;
+  animation-delay: 0ms !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .glow,
+  :root:not([data-motion="full"]) .status-dot::after {
+    animation: none !important;
+  }
   :root:not([data-motion="full"]) *,
   :root:not([data-motion="full"]) *::before,
   :root:not([data-motion="full"]) *::after {
@@ -1036,6 +1262,7 @@ label.row {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
+  animation-delay: 0ms !important;
   }
 }
 

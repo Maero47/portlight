@@ -6,6 +6,7 @@ import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platfo
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, saveSettings, writeSettings, type Settings } from "../lib/settings.ts";
 import { icon } from "../popup/icons.ts";
 import { WriteScheduler } from "./writer.ts";
+import { heartbeat, roll, setReducedMotion, sleepWhenHidden } from "../lib/motion.ts";
 import {
   EDITORS,
   GROUPS,
@@ -29,6 +30,10 @@ const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 const root = document.documentElement;
 
 let settings: Settings = { ...DEFAULT_SETTINGS };
+
+const reduceQuery = matchMedia("(prefers-reduced-motion: reduce)");
+setReducedMotion(() => settings.motion === "reduced" || (settings.motion === "system" && reduceQuery.matches));
+sleepWhenHidden();
 
 // ---------- static bits ----------
 
@@ -225,7 +230,10 @@ spin.addEventListener("keydown", (e) => {
 
 function renderStepper() {
   const h = settings.idleAfterHours;
-  $("idle-value").textContent = formatIdle(h);
+  // The hours roll like a counter once the page is up; the first render just sets them.
+  const value = $("idle-value");
+  if (root.classList.contains("ready")) roll(value, formatIdle(h));
+  else value.textContent = value.dataset.roll = formatIdle(h);
   spin.setAttribute("aria-valuenow", String(h));
   spin.setAttribute("aria-valuetext", formatIdle(h));
   spin.querySelector<HTMLButtonElement>('[data-step="1"]')!.disabled = h >= IDLE_MAX_HOURS;
@@ -531,6 +539,7 @@ async function checkHost() {
     const pong = await host.ping();
     box.dataset.state = "connected";
     text.textContent = "Connected";
+    heartbeat(box.querySelector(".status-dot")!, 0);
     $("helper-sub").textContent = `Version ${pong.hostVersion} on ${platformName(pong.platform)}.`;
     $("helper-install").hidden = true;
   } catch (e) {
