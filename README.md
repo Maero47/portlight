@@ -90,6 +90,8 @@ Nothing leaves your computer. There is no account, analytics or remote server.
 - Quitting a process asks first, and the helper refuses anything that isn't yours or isn't
   holding a listening port, and never touches the browser itself.
 
+The full privacy policy is in [PRIVACY.md](PRIVACY.md).
+
 ## Development
 
 ```sh

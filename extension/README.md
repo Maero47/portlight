@@ -7,6 +7,7 @@ npm install
 npm run build          # writes dist/; load it in chrome://extensions with "Load unpacked"
 npm test               # unit tests (Vitest) + build + popup tests against a mocked host
 npm run test:e2e:real  # ../install.sh into a temp HOME, real host, real servers (macOS/Linux)
+npm run build:store    # release/portlight-<version>.zip for the Web Store (no "key"), then checks it
 npm run store:shots    # ../assets/store/screenshot-*.png from the real popup
 npm run perf:motion    # frame pacing and idle CPU of the popup's motion (see Motion)
 npm run record:motion  # screenshots/motion/*.mp4
