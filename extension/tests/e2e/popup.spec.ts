@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { openPopup, PINNED_ID, SHOTS } from "./harness.ts";
+import { DISMISS_KEY } from "../../src/lib/onboard.ts";
 
 mkdirSync(SHOTS, { recursive: true });
 const shot = (name: string) => resolve(SHOTS, `${name}.png`);
@@ -35,15 +36,6 @@ for (const scheme of ["light", "dark"] as const) {
       expect(errors).toEqual([]);
     });
 
-    test("host missing onboarding", async ({ page }) => {
-      const { errors } = await openPopup(page, { scheme, scenario: "missing" });
-      await expect(page.locator(".onboard h2")).toHaveText("Connect the Portlight helper");
-      await expect(page.locator(".code code")).toHaveText("./install.sh");
-      await expect(page.locator("#status-text")).toHaveText("Not connected");
-      await page.screenshot({ path: shot(`onboarding-${scheme}`) });
-      expect(errors).toEqual([]);
-    });
-
     test("free-port check", async ({ page }) => {
       const { errors } = await openPopup(page, { scheme });
       await expect(page.locator("li.row")).toHaveCount(10);
@@ -66,12 +58,14 @@ for (const scheme of ["light", "dark"] as const) {
         scheme,
         scenario: "missing",
         httpPorts: { 3000: "Storefront — Next.js", 5173: "Vite + TS", 8080: "" },
+        local: { [DISMISS_KEY]: { at: Date.now(), failure: "missing" } },
       });
-      await page.getByRole("button", { name: "Scan common ports over HTTP" }).click();
       await expect(page.locator("li.row")).toHaveCount(3);
       await expect(page.locator("#status-text")).toHaveText("3 servers · HTTP only", { timeout: 15_000 });
       await expect(page.locator("li.row").first()).toContainText("Storefront — Next.js");
       await expect(page.locator('li.row [data-act="kill"]').first()).toBeHidden();
+      await expect(page.locator("#banner")).toContainText("HTTP only. The helper isn’t installed.");
+      await expect(page.locator("#sheet-layer")).toBeHidden();
       await page.mouse.move(0, 0);
       await page.screenshot({ path: shot(`fallback-${scheme}`) });
       // Closed ports are expected to refuse; Chrome logs those itself and JS cannot silence them.
@@ -138,9 +132,15 @@ test("copy URL and suggested port", async ({ page, context }) => {
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("3001");
 });
 
-test("forbidden host shows the reconnect variant", async ({ page }) => {
+test("forbidden host shows the reconnect variant, with this extension's ID", async ({ page }) => {
   await openPopup(page, { scenario: "forbidden" });
-  await expect(page.locator(".onboard h2")).toHaveText("Reconnect the helper");
+  await expect(page.getByRole("dialog")).toContainText("Reconnect the helper");
+  await expect(page.locator(".sheet .code code")).toHaveText(`npx portlight-host install --extension-id ${PINNED_ID}`);
+  // The dev build can also just rerun the repo's installer.
+  await expect(page.locator(".sheet-hint.dev")).toHaveText("From a clone of the repo, ./install.sh does the same.");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#banner")).toContainText("The helper needs reconnecting.");
+  await expect(page.getByRole("button", { name: "Fix…" })).toBeVisible();
 });
 
 test("an extension ID other than the pinned one is passed to the installer", async ({ page, context }) => {
@@ -148,9 +148,11 @@ test("an extension ID other than the pinned one is passed to the installer", asy
   const other = "abcdefghijklmnopabcdefghijklmnop";
   expect(other).not.toBe(PINNED_ID);
   await openPopup(page, { scenario: "missing", id: other });
-  await expect(page.locator(".code code")).toHaveText(`./install.sh ${other}`);
+  await expect(page.locator(".sheet .code code")).toHaveText(`npx portlight-host install --extension-id ${other}`);
+  // A store or other build has no repo to run ./install.sh from.
+  await expect(page.locator(".sheet")).not.toContainText("install.sh");
   await page.getByRole("button", { name: "Copy install command" }).click();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`./install.sh ${other}`);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`npx portlight-host install --extension-id ${other}`);
 });
 
 test("talks to the host over one connectNative port", async ({ page }) => {
@@ -168,8 +170,10 @@ test.describe("on Linux", () => {
   test.use({ userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36" });
   test("copy never says Mac", async ({ page }) => {
     await openPopup(page, { scenario: "missing" });
-    await expect(page.locator(".onboard")).toContainText("this computer’s listening ports");
-    await expect(page.locator(".code code")).toHaveText("./install.sh");
+    await expect(page.getByRole("dialog")).toContainText("this computer’s listening ports");
+    await expect(page.locator(".sheet .code code")).toHaveText("npx portlight-host install");
+    await expect(page.getByRole("radio", { name: "Homebrew" })).toBeVisible();
+    expect(await page.locator("body").innerText()).not.toMatch(/\bMac\b/);
     await openPopup(page);
     await expect(page.locator(".scope.local").first()).toHaveAttribute("title", "Only reachable from this computer");
     expect(await page.locator("body").innerText()).not.toMatch(/\bMac\b/);
@@ -379,7 +383,7 @@ test("reveal and editor talk to the host, and explain when the helper is too old
   const row = page.locator('li.row[data-key^="5173:"]');
   await row.click({ button: "right" });
   await page.locator("#menu").getByRole("menuitem", { name: "Reveal in Finder" }).click();
-  await expect(row.locator(".confirm-text")).toHaveText("Reveal in Finder needs a newer helper. Run ./install.sh again to update it.");
+  await expect(row.locator(".confirm-text")).toHaveText("Reveal in Finder needs a newer helper. Run npx portlight-host install again to update it.");
   await row.getByRole("button", { name: "OK" }).click();
   await expect(row).not.toHaveClass(/confirming/);
 
@@ -434,7 +438,6 @@ test("HTTP fallback probes the user's extra ports and ports open in tabs", async
     tabs: [{ url: "http://localhost:6123/", title: "Odd port app" }],
     httpPorts: { 4567: "Sinatra", 6123: "Odd port app" },
   });
-  await page.getByRole("button", { name: "Scan common ports over HTTP" }).click();
   await expect(page.locator('li.row[data-key="4567:http"]')).toContainText("Sinatra");
   await expect(page.locator('li.row[data-key="6123:http"] .tabs')).toHaveText("1 tab");
 });

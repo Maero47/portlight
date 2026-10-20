@@ -159,7 +159,7 @@ test("open on phone: a Next.js server gets -H 0.0.0.0; old helpers and offline m
   row = page.locator('li.row[data-key^="8000:"]');
   await row.click({ button: "right" });
   await page.locator("#menu").getByRole("menuitem", { name: "Open on Phone…" }).click();
-  await expect(row.locator(".confirm-text")).toHaveText("Open on Phone needs a newer helper. Run ./install.sh again to update it.");
+  await expect(row.locator(".confirm-text")).toHaveText("Open on Phone needs a newer helper. Run npx portlight-host install again to update it.");
 });
 
 test("phone and share are offered for web servers only", async ({ page }) => {

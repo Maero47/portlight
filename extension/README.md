@@ -13,7 +13,8 @@ npm run record:motion  # screenshots/motion/*.mp4
 ```
 
 First run of the Playwright tests needs a browser: `npx playwright install chromium`.
-For everyday use, run `./install.sh` in the repository root instead.
+To use Portlight from a clone, run `./install.sh` in the repository root. Everyone else installs the
+helper with `npx portlight-host install` (or Homebrew), which is what the popup suggests.
 
 ## How it works
 
@@ -39,7 +40,10 @@ For everyday use, run `./install.sh` in the repository root instead.
   The popup holds one `connectNative` port while open (measured: `list` 105 → 68 ms median,
   `ping` 52 → 1 ms, and no process spawned every 2 s); the badge worker uses one-off
   `sendNativeMessage` calls so it never keeps the service worker alive.
-- `src/lib/platform.ts` — "this Mac" vs "this computer", and the install command onboarding shows.
+- `src/lib/platform.ts` has the "this Mac" or "this computer" wording, the extension IDs the installer
+  knows (`EXTENSION_IDS`: the pinned dev ID, and an empty slot for the Chrome Web Store ID until it
+  exists), and `installPlan()`, which builds the install commands for the popup and the options page.
+  An ID the installer doesn't know, or a helper set up for another ID, gets `--extension-id <id>`.
 - `src/lib/meta.ts` — favicon and `<title>` of local web servers, fetched after the list paints (1.2 s timeout,
   no redirects, same-origin icons only, ≤ 24 KB) and cached per port + pid in `localStorage`. The icon leads the
   row's name; a title that says more than the folder (not "Vite + React + TS") replaces the process name.
@@ -53,10 +57,32 @@ For everyday use, run `./install.sh` in the repository root instead.
 - Idle cleanup — dev servers running longer than `idleAfterHours` with no tab (not hidden, not shared, not
   containers or OS services) are offered as "Quit N Idle…" in the footer; one confirm quits them with their child
   processes.
-- `src/lib/probe.ts` — fallback when the host is missing: probes common dev ports, the user's
+- `src/lib/probe.ts` is the fallback when the host is missing. The popup switches to it by itself, so
+  it is useful without the helper. It probes common dev ports, the user's
   `extraProbePorts` and any port open in a tab over HTTP. Results are labelled "HTTP only"; databases and
   other non-HTTP services are invisible this way. AirPlay Receiver is recognised by its `Server: AirTunes`
   header and treated as a system port.
+
+### Without the helper
+
+When the helper is missing, or installed for another extension ID, the popup shows the HTTP list and
+opens a sheet over it. The sheet says what the helper is for, gives the command for this OS with a
+copy button (npm or Homebrew on macOS and Linux; npx on Windows, with `winget` for Node.js), and has
+Check Again. While it is open the popup asks for the helper every 2.5 s and when its window regains
+focus, and the HTTP rescan (every 8 s) asks too. Once the helper answers, the sheet shows a short
+"Helper connected" and closes, and the full list comes in.
+
+Not now, the close button, Esc and a click outside all put the sheet away. That choice is saved in
+`chrome.storage.local` (`src/lib/onboard.ts`), and from then on a one line banner above the list
+reopens it. The sheet opens by itself again after 14 days, or when the failure changes (missing to
+installed for another ID). An extension update alone does not bring it back, because store updates
+arrive silently and a sheet appearing then would have no visible cause. A working helper clears the
+saved choice. When the HTTP scan was picked from the error screen (the helper is installed but not
+answering), the banner offers Try Again instead of the installer.
+
+The sheet is a modal dialog: the list underneath is inert, Tab stays inside, and focus goes back to
+where it was. It rises on the `SETTLE` spring and leaves on the exit curve; with reduced motion it only
+fades.
 
 ### Chrome Local Network Access
 

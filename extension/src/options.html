@@ -39,11 +39,17 @@
             </div>
           </div>
           <div class="install" id="helper-install" hidden>
-            <p class="install-text" id="install-text">In the Portlight folder, run this once, then check again. No restart needed.</p>
+            <p class="install-text" id="install-text">Run this once in a terminal, then check again. No restart needed.</p>
+            <div class="segmented install-method" id="install-method" role="radiogroup" aria-label="Install with" style="--n: 2">
+              <label><input type="radio" name="install-method" value="npm" /><span>npm</span></label>
+              <label><input type="radio" name="install-method" value="brew" /><span>Homebrew</span></label>
+              <span class="thumb" aria-hidden="true"></span>
+            </div>
             <div class="code">
               <code id="install-cmd"></code>
               <button class="icon-btn" type="button" id="copy-install" aria-label="Copy install command" title="Copy command"><span data-icon="copy"></span></button>
             </div>
+            <p class="install-hint" id="install-hint"></p>
             <div class="install-actions">
               <button class="btn" type="button" id="recheck">Check Again</button>
             </div>

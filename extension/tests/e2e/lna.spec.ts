@@ -48,13 +48,14 @@ for (const [mode, flags] of Object.entries(MODES)) {
         if (m.type() === "error" && !/ERR_CONNECTION_REFUSED|Failed to load resource/.test(m.text())) errors.push(m.text());
       });
       await page.goto(`chrome-extension://${id}/popup.html`);
-      await expect(page.locator("#app")).toHaveAttribute("data-mode", /^(missing|host)$/);
+      await expect(page.locator("#app")).toHaveAttribute("data-mode", /^(fallback|host)$/);
       test.skip((await page.locator("#app").getAttribute("data-mode")) === "host", "a native host is installed for this profile");
 
       // The port is random, so it reaches the scan through the user's extra probe ports.
       await page.evaluate((p) => chrome.storage.local.set({ "portlight.settings": { version: 1, extraProbePorts: [p] } }), port);
+      // Without a helper the popup scans by itself; the install sheet sits on top until put away.
       await page.reload();
-      await page.getByRole("button", { name: "Scan common ports over HTTP" }).click();
+      await page.getByRole("button", { name: "Not now" }).click();
       const row = page.locator(`li.row[data-key="${port}:http"]`);
       await expect(row.locator(".name")).toHaveText("LNA probe target", { timeout: 20_000 });
       await expect(row.locator(".tabs")).toHaveText("1 tab");

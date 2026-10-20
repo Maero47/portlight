@@ -2,7 +2,7 @@
 // changes, and onSettingsChanged() keeps this page in step with the popup and other tabs.
 
 import { HostClient, HostConnectionError, chromeTransport } from "../lib/host.ts";
-import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
+import { NODE_URL, detectOs, installPlan, thisDevice, yourDevices, type InstallMethod } from "../lib/platform.ts";
 import { DEFAULT_SETTINGS, loadSettings, onSettingsChanged, saveSettings, writeSettings, type Settings } from "../lib/settings.ts";
 import { icon } from "../popup/icons.ts";
 import { WriteScheduler } from "./writer.ts";
@@ -156,7 +156,7 @@ function applyLook() {
 
 // ---------- segmented controls ----------
 
-for (const seg of document.querySelectorAll<HTMLElement>(".segmented")) {
+for (const seg of document.querySelectorAll<HTMLElement>(".segmented[data-setting]")) {
   const key = seg.dataset.setting as "theme" | "motion";
   const inputs = [...seg.querySelectorAll<HTMLInputElement>("input")];
   seg.style.setProperty("--n", String(inputs.length));
@@ -168,7 +168,7 @@ for (const seg of document.querySelectorAll<HTMLElement>(".segmented")) {
 }
 
 function renderSegmented() {
-  for (const seg of document.querySelectorAll<HTMLElement>(".segmented")) {
+  for (const seg of document.querySelectorAll<HTMLElement>(".segmented[data-setting]")) {
     const key = seg.dataset.setting as "theme" | "motion";
     const inputs = [...seg.querySelectorAll<HTMLInputElement>("input")];
     const i = Math.max(0, inputs.findIndex((x) => x.value === settings[key]));
@@ -549,14 +549,14 @@ async function checkHost() {
     text.textContent = kind === "missing" ? "Not installed" : kind === "forbidden" ? "Needs reinstall" : "Not responding";
     $("helper-sub").textContent = `Reads ports and processes on ${thisDevice(os)}.`;
     $("helper-install").hidden = false;
+    helperFailure = kind;
     $("install-text").textContent =
       kind === "forbidden"
-        ? "The helper is installed for a different extension ID. In the Portlight folder, run the installer again:"
+        ? "The helper is installed for a different extension ID. Run the installer again to allow this one:"
         : kind === "missing"
-          ? "In the Portlight folder, run this once, then check again. No restart needed."
+          ? "Run this once in a terminal, then check again. No restart needed."
           : "The helper didn’t answer. Running the installer again usually fixes it:";
-    const { cmd, args } = installCommand(extensionId(), __PINNED_ID__, os);
-    $("install-cmd").innerHTML = `<span class="cmd">${esc(cmd)}</span>${args ? ` ${esc(args)}` : ""}`;
+    renderInstall();
   } finally {
     recheck.disabled = false;
   }
@@ -565,6 +565,45 @@ async function checkHost() {
 function extensionId(): string {
   return (typeof chrome !== "undefined" && chrome.runtime?.id) || "<extension-id>";
 }
+
+// Same commands as the popup's install sheet (lib/platform.ts).
+let helperFailure = "missing";
+let installMethod: InstallMethod = "npm";
+try {
+  if (localStorage.getItem("portlight.installMethod") === "brew") installMethod = "brew";
+} catch {
+  /* npm */
+}
+
+function renderInstall() {
+  const plan = installPlan(extensionId(), os, { forbidden: helperFailure === "forbidden" });
+  const seg = $("install-method");
+  seg.hidden = plan.choices.length < 2;
+  const choice = plan.choices.find((c) => c.method === installMethod) ?? plan.choices[0]!;
+  const inputs = [...seg.querySelectorAll<HTMLInputElement>("input")];
+  inputs.forEach((x) => (x.checked = x.value === choice.method));
+  seg.style.setProperty("--i", String(Math.max(0, inputs.findIndex((x) => x.checked))));
+  $("install-cmd").textContent = choice.command;
+  const hint = $("install-hint");
+  if (plan.nodeSetup) {
+    hint.innerHTML = `Needs Node.js 18 or later. Don’t have it? Run <code>${esc(plan.nodeSetup)}</code> first.`;
+  } else if (choice.method === "npm") {
+    hint.innerHTML = `Needs Node.js 18 or later, from <a href="${NODE_URL}" target="_blank" rel="noopener">nodejs.org</a>.`;
+  } else {
+    hint.textContent = "Homebrew installs the helper, then it connects itself to Chrome.";
+  }
+  if (plan.devCommand) hint.insertAdjacentHTML("beforeend", ` From a clone of the repo, <code>${esc(plan.devCommand)}</code> does the same.`);
+}
+
+$("install-method").addEventListener("change", (e) => {
+  installMethod = (e.target as HTMLInputElement).value as InstallMethod;
+  try {
+    localStorage.setItem("portlight.installMethod", installMethod);
+  } catch {
+    /* this page only */
+  }
+  renderInstall();
+});
 
 $("recheck").addEventListener("click", () => void checkHost());
 $("copy-install").addEventListener("click", async () => {

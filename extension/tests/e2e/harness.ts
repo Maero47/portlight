@@ -16,7 +16,8 @@ const TYPES: Record<string, string> = {
   ".json": "application/json",
 };
 
-export type Scenario = "list" | "empty" | "missing" | "forbidden";
+/** crashed: a helper that is installed but exits without answering. */
+export type Scenario = "list" | "empty" | "missing" | "forbidden" | "crashed";
 export interface MockTab {
   url: string;
   title: string;
@@ -35,6 +36,8 @@ export interface MockOptions {
   tunnel?: MockTunnel;
   /** LAN addresses for netinfo; null = a helper that doesn't know netinfo. */
   lan?: { name: string; address: string; family: "IPv4" | "IPv6"; virtual: boolean }[] | null;
+  /** Extra chrome.storage.local entries, e.g. an earlier "Not now" on the install sheet. */
+  local?: Record<string, unknown>;
 }
 export interface MockTunnel {
   providers?: { cloudflared: boolean; ngrok: boolean };
@@ -79,6 +82,9 @@ export async function openPopup(
     respawn?: number[];
     tunnel?: MockTunnel;
     lan?: MockOptions["lan"];
+    local?: MockOptions["local"];
+    /** Hold the answering ports' probes this long (a scan still in flight); closed ports refuse at once. */
+    probeDelayMs?: number;
     /** Favicons (SVG markup) per port, linked from the page that port serves. */
     favicons?: Record<number, string>;
     /** Screenshots and most tests run with Reduce Motion on, so nothing is caught mid-animation. */
@@ -101,7 +107,7 @@ export async function openPopup(
     return route.fulfill({ status: 200, body: readFileSync(file), contentType: TYPES[extname(file)] ?? "application/octet-stream" });
   });
   // HTTP fallback probes: only the ports in `httpPorts` answer.
-  await page.route(/^http:\/\/localhost:\d+\//, (route) => {
+  await page.route(/^http:\/\/localhost:\d+\//, async (route) => {
     const url = new URL(route.request().url());
     const port = Number(url.port);
     // Playwright can't intercept /favicon.ico itself, so mocked pages link their icon (unit tests cover /favicon.ico).
@@ -110,23 +116,24 @@ export async function openPopup(
     }
     const title = httpPorts[port];
     if (title === undefined) return route.abort("connectionrefused");
+    if (opts.probeDelayMs) await new Promise((r) => setTimeout(r, opts.probeDelayMs));
     return route.fulfill({
       status: 200,
       contentType: "text/html",
       headers: { "access-control-allow-origin": "*" },
       body: `<!doctype html><title>${title}</title>${favicons[port] ? `<link rel="icon" href="/icon.svg">` : ""}`,
-    });
+    }).catch(() => {}); // the probe may have timed out meanwhile
   });
 
   await page.emulateMedia({ colorScheme: scheme, reducedMotion });
   if (reducedMotion === "reduce") await settleTransitions(page);
-  await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn, tunnel, lan } satisfies MockOptions);
+  await page.addInitScript(mockChrome, { scenario, id, settings, tabs, oldHost, respawn, tunnel, lan, local: opts.local } satisfies MockOptions);
   await page.goto(`${ORIGIN}/popup.html`);
   return { errors };
 }
 
 /** Runs in the page. Keep it self-contained. */
-function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respawn = [], tunnel = {}, lan = [] }: MockOptions) {
+function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respawn = [], tunnel = {}, lan = [], local = {} }: MockOptions) {
   const now = Date.now();
   const ago = (min: number) => new Date(now - min * 60_000).toISOString();
   const L = (port: number, address: string, process: string, pid: number, cwd: string | null, command: string, startedMin: number, container: any = undefined) => ({
@@ -134,9 +141,7 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
     ...(container ? { container } : {}),
   });
   const DOCKER = "/Applications/Docker.app/Contents/MacOS/com.docker.backend";
-  let listeners =
-    scenario === "list"
-      ? [
+  const full = () => [
           L(3000, "127.0.0.1", "node", 48211, "/Users/mali/code/storefront", "node /Users/mali/code/storefront/node_modules/.bin/next dev", 134),
           L(3000, "::1", "node", 48211, "/Users/mali/code/storefront", "node /Users/mali/code/storefront/node_modules/.bin/next dev", 134),
           L(5173, "::1", "node", 51877, "/Users/mali/code/portlight/extension", "node /Users/mali/code/portlight/extension/node_modules/.bin/vite", 12),
@@ -156,20 +161,34 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
           L(6380, "127.0.0.1", "com.docker.backend", 1402, null, DOCKER, 300, {
             id: "41be07", name: "shop-cache-1", image: "redis:7", project: "shop", containerPort: 6379, workingDir: "/Users/mali/code/shop",
           }),
-        ]
-      : [];
+        ];
+  let listeners = scenario === "list" ? full() : [];
   // Lets a test change what the "host" reports, e.g. a server restarting under a new pid.
   (window as any).__mutate = (fn: (l: any[]) => any[]) => void (listeners = fn(listeners));
   const opened: string[] = [];
   (window as any).__opened = opened;
   (window as any).__requests = [];
   (window as any).__spawns = [];
-  const failure =
+  let failure =
     scenario === "missing"
       ? "Specified native messaging host not found."
       : scenario === "forbidden"
         ? "Access to the specified native messaging host is forbidden."
-        : null;
+        : scenario === "crashed"
+          ? "Native host has exited."
+          : null;
+  // "Run the installer": from now on the host answers with the full list.
+  (window as any).__install = () => {
+    failure = null;
+    listeners = full();
+  };
+  // And the reverse: the helper goes away, dropping any open connection like Chrome does.
+  const live = new Set<() => void>();
+  (window as any).__uninstall = () => {
+    failure = "Specified native messaging host not found.";
+    listeners = [];
+    for (const drop of [...live]) drop();
+  };
   const answer = (msg: any): any => {
     (window as any).__requests.push(msg);
     const busy = new Set(listeners.map((l) => l.port));
@@ -240,11 +259,13 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
       const drop = () => {
         if (!open) return;
         open = false;
+        live.delete(drop);
         runtime.lastError = { message: failure };
         onDisc.forEach((f) => f());
         runtime.lastError = undefined;
       };
       if (failure) setTimeout(drop, 15);
+      else live.add(drop);
       return {
         onMessage: { addListener: (f: (m: any) => void) => onMsg.push(f) },
         onDisconnect: { addListener: (f: () => void) => onDisc.push(f) },
@@ -260,7 +281,7 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
     },
   };
   // chrome.storage (local + sync) with change events, so the popup's settings round-trip like the real thing.
-  const store: Record<string, any> = settings ? { "portlight.settings": { version: 1, ...settings } } : {};
+  const store: Record<string, any> = { ...local, ...(settings ? { "portlight.settings": { version: 1, ...settings } } : {}) };
   const storageListeners: ((changes: any, area: string) => void)[] = [];
   (window as any).__store = store;
   const badges: string[] = [];
@@ -301,6 +322,11 @@ function mockChrome({ scenario, id, settings, tabs = [], oldHost = false, respaw
           changes[k] = { oldValue: data[k], newValue: structuredClone(v) };
           data[k] = structuredClone(v);
         }
+        setTimeout(() => storageListeners.forEach((f) => f(changes, name)), 0);
+      },
+      remove: async (key: string) => {
+        const changes = { [key]: { oldValue: data[key] } };
+        delete data[key];
         setTimeout(() => storageListeners.forEach((f) => f(changes, name)), 0);
       },
     };

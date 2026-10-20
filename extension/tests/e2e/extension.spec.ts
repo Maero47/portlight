@@ -26,12 +26,14 @@ test("the built extension loads, registers its worker and opens the popup cleanl
 
     const page = await context.newPage();
     const errors: string[] = [];
-    page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    // Without a helper the popup scans common ports over HTTP; Chrome logs the refusals itself.
+    page.on("console", (m) => m.type() === "error" && !/Failed to load resource/.test(m.text()) && errors.push(m.text()));
     page.on("pageerror", (e) => errors.push(String(e)));
     await page.goto(`chrome-extension://${id}/popup.html`);
-    await expect(page.locator("#app")).toHaveAttribute("data-mode", /^(missing|host)$/);
-    if ((await page.locator("#app").getAttribute("data-mode")) === "missing") {
-      await expect(page.locator(".code code")).toHaveText("./install.sh");
+    await expect(page.locator("#app")).toHaveAttribute("data-mode", /^(fallback|host)$/);
+    if ((await page.locator("#app").getAttribute("data-mode")) === "fallback") {
+      await expect(page.getByRole("dialog")).toBeVisible();
+      await expect(page.locator(".sheet .code code")).toHaveText("npx portlight-host install");
     }
     expect(errors).toEqual([]);
   } finally {

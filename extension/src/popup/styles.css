@@ -967,33 +967,17 @@ kbd.keycap {
 
 .state > h2,
 .state > p,
-.state > .actions-row,
-.onboard-head > h2,
-.onboard-head > p,
-.onboard .step,
-.onboard-actions,
-.onboard-note {
+.state > .actions-row {
   animation: rise-in var(--spring-dur) var(--spring) both;
   animation-delay: 60ms;
 }
 
-.state > p,
-.onboard-head > p {
+.state > p {
   animation-delay: 100ms;
 }
 
-.state > .actions-row,
-.onboard .step:nth-child(1) {
+.state > .actions-row {
   animation-delay: 140ms;
-}
-
-.onboard .step:nth-child(2) {
-  animation-delay: 180ms;
-}
-
-.onboard-actions,
-.onboard-note {
-  animation-delay: 220ms;
 }
 
 .state h2 {
@@ -1019,80 +1003,6 @@ kbd.keycap {
 
 .state.error .state-mark {
   color: var(--red-text);
-}
-
-.onboard {
-  min-height: 100%;
-  padding: 6px 18px 18px;
-  display: grid;
-  align-content: start;
-  animation: fade 300ms ease both;
-}
-
-.onboard-head {
-  display: grid;
-  justify-items: center;
-  text-align: center;
-  padding: 10px 6px 16px;
-}
-
-.onboard .state-mark {
-  width: 48px;
-  height: 48px;
-  border-radius: 13px;
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.onboard h2 {
-  margin: 0 0 6px;
-  font: 600 17px/1.2 var(--font-display);
-  letter-spacing: -0.02em;
-}
-
-.onboard-head p {
-  margin: 0;
-  color: var(--label-2);
-  font-size: 12.5px;
-  line-height: 1.45;
-  text-wrap: pretty;
-}
-
-.steps {
-  list-style: none;
-  margin: 0 0 14px;
-  padding: 0;
-  display: grid;
-  gap: 12px;
-}
-
-.step {
-  display: grid;
-  grid-template-columns: 20px 1fr;
-  column-gap: 10px;
-  align-items: start;
-}
-
-.step-n {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  color: var(--label-2);
-  background: var(--fill);
-}
-
-.step-text {
-  padding-top: 1px;
-  font-size: 12.5px;
-}
-
-.step-text .muted {
-  color: var(--label-2);
 }
 
 .code {
@@ -1125,21 +1035,261 @@ kbd.keycap {
   height: 26px;
 }
 
-.onboard-actions {
+/* ---------- install sheet ----------
+   A sheet over the popup (the list stays underneath, live over HTTP). It rises from the bottom
+   edge on --spring and leaves quicker on the exit curve (driven from main.ts); with reduced
+   motion it only fades. */
+
+.sheet-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.sheet-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.sheet {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  max-height: calc(100% - 52px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  padding: 18px 16px 14px;
+  border-radius: 14px;
+  background: var(--raised);
+  box-shadow: 0 0 0 0.5px var(--hairline), 0 12px 32px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.sheet:focus-visible {
+  outline: none;
+}
+
+.sheet-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: var(--label-3);
+}
+
+.sheet-close:hover {
+  color: var(--label-2);
+}
+
+.sheet-head {
   display: grid;
-  gap: 4px;
-  margin-top: 2px;
+  grid-template-columns: auto 1fr;
+  column-gap: 11px;
+  align-items: center;
+  padding-right: 22px;
 }
 
-.onboard-actions .btn {
-  width: 100%;
+.sheet-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
-.onboard-note {
-  margin: 12px 0 0;
-  text-align: center;
+.sheet h2 {
+  margin: 0;
+  font: 600 15px/1.25 var(--font-display);
+  letter-spacing: -0.016em;
+}
+
+.sheet-desc {
+  grid-column: 1 / -1;
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--label-2);
+  text-wrap: pretty;
+}
+
+.sheet-how {
+  margin-top: 14px;
+}
+
+.sheet-how .code {
+  margin-top: 8px;
+  align-items: center;
+  padding: 5px 5px 5px 10px;
+}
+
+.sheet-how .code code {
+  padding-top: 0;
+}
+
+.sheet-hint {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--label-2);
+  text-wrap: pretty;
+}
+
+.sheet-hint code {
+  font: 11px var(--mono);
+  color: var(--label);
+}
+
+.sheet-hint .link {
+  font-size: inherit;
+}
+
+.sheet-step {
+  margin: 0;
+  font-size: 12px;
+  color: var(--label);
+}
+
+.sheet-step + .code + .sheet-step {
+  margin-top: 10px;
+}
+
+/* npm / Homebrew */
+.seg {
+  --i: 0;
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--fill);
+  isolation: isolate;
+}
+
+.seg-opt {
+  position: relative;
+  z-index: 1;
+  height: 22px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--label-2);
+  transition: color var(--fast) ease;
+}
+
+.seg-opt[aria-checked="true"] {
+  color: var(--label);
+}
+
+.seg-opt:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 0;
+}
+
+.seg-thumb {
+  position: absolute;
+  z-index: 0;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc((100% - 4px) / 2);
+  border-radius: 5px;
+  background: var(--raised);
+  box-shadow: var(--shadow-raised), 0 0 0 0.5px var(--hairline);
+  transform: translateX(calc(var(--i) * 100%));
+  transition: transform var(--spring-dur) var(--spring);
+}
+
+.sheet-status {
+  margin: 14px 0 0;
+  min-height: 16px;
   font-size: 11.5px;
   color: var(--label-2);
+}
+
+.sheet-status.error {
+  color: var(--red-text);
+}
+
+.sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.sheet-done {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  padding: 18px 0 14px;
+}
+
+.sheet-done .sheet-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--green-text);
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+  margin-bottom: 12px;
+}
+
+.sheet-done p {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--label-2);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .sheet-scrim {
+    background: rgba(0, 0, 0, 0.42);
+  }
+  :root:not([data-theme="light"]) .sheet {
+    box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 14px 36px rgba(0, 0, 0, 0.55);
+  }
+}
+
+:root[data-theme="dark"] .sheet-scrim {
+  background: rgba(0, 0, 0, 0.42);
+}
+
+:root[data-theme="dark"] .sheet {
+  box-shadow: 0 0 0 0.5px rgba(255, 255, 255, 0.1), 0 14px 36px rgba(0, 0, 0, 0.55);
+}
+
+/* Banner after "Not now": one quiet line that reopens the sheet. */
+.banner {
+  align-items: center;
+}
+
+.banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.banner .glyph {
+  margin-top: 0;
+}
+
+.banner-btn {
+  flex: none;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--raised);
+  color: var(--accent-text);
+  box-shadow: var(--shadow-raised), 0 0 0 0.5px var(--hairline);
+}
+
+.banner-btn:hover {
+  background: var(--raised);
+  color: var(--accent);
 }
 
 /* ---------- footer ---------- */
@@ -1868,6 +2018,9 @@ code.inline {
   :root:not([data-motion="full"]) .sweep-content {
     transform: none !important;
   }
+  :root:not([data-motion="full"]) .seg-thumb {
+    transition: none;
+  }
   :root:not([data-motion="full"]) .btn:active,
   :root:not([data-motion="full"]) .icon-btn:active,
   :root:not([data-motion="full"]) .suggest-pill:active {
@@ -1901,6 +2054,9 @@ code.inline {
 :root[data-motion="reduced"] .confirm-content,
 :root[data-motion="reduced"] .sweep-content {
   transform: none !important;
+}
+:root[data-motion="reduced"] .seg-thumb {
+  transition: none;
 }
 :root[data-motion="reduced"] .btn:active,
 :root[data-motion="reduced"] .icon-btn:active,
