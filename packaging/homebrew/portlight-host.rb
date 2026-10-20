@@ -2,7 +2,7 @@ class PortlightHost < Formula
   desc "Native helper for the Portlight browser extension"
   homepage "https://www.npmjs.com/package/portlight-host"
   url "https://registry.npmjs.org/portlight-host/-/portlight-host-0.1.0.tgz"
-  sha256 "92d3737570a3ab29306d06f8c722741ab7826e0b9f620845de6dd2b1a8ad6aec"
+  sha256 "edb0e532d86203fda2b9809c160dab8118a13959d6ea356e87f32c5f133ba4cc"
   license "MIT"
 
   depends_on "node"
