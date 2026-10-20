@@ -132,9 +132,13 @@ for (const scheme of ["light", "dark"] as const) {
 test("helper missing shows the install command", async ({ page }) => {
   const { errors } = await openOptions(page, { host: "missing" });
   await expect(page.locator("#helper-text")).toHaveText("Not installed");
-  await expect(page.locator("#install-cmd")).toHaveText("./install.sh");
+  await expect(page.locator("#install-cmd")).toHaveText("npx portlight-host install");
+  await expect(page.locator("#install-text")).not.toContainText("Portlight folder");
+  await expect(page.locator("#install-hint")).toContainText("Node.js 18 or later");
   await expect(page.locator("#helper-sub")).toHaveText("Reads ports and processes on this Mac.");
   await page.locator("#helper").screenshot({ path: shot("options-helper-missing-light") });
+  await page.getByRole("radiogroup", { name: "Install with" }).getByText("Homebrew").click();
+  await expect(page.locator("#install-cmd")).toHaveText("brew install maero47/tap/portlight-host && portlight-host install");
   expect(errors).toEqual([]);
 });
 
@@ -142,6 +146,7 @@ test("helper for another ID asks for a reinstall", async ({ page }) => {
   await openOptions(page, { host: "forbidden" });
   await expect(page.locator("#helper-text")).toHaveText("Needs reinstall");
   await expect(page.locator("#install-text")).toContainText("different extension ID");
+  await expect(page.locator("#install-cmd")).toHaveText(/^npx portlight-host install --extension-id [a-p]{32}$/);
 });
 
 test("every setting round-trips through chrome.storage.local", async ({ page, browser }) => {

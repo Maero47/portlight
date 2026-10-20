@@ -1052,6 +1052,31 @@ label.row {
   color: var(--accent-text);
 }
 
+.install-method {
+  width: 180px;
+  margin-bottom: 8px;
+}
+
+.install-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--label-2);
+}
+
+.install-hint code {
+  font: 11.5px var(--mono);
+  color: var(--label);
+}
+
+.install-hint a {
+  color: var(--accent-text);
+  text-decoration: none;
+}
+
+.install-hint a:hover {
+  text-decoration: underline;
+}
+
 .install-actions {
   display: flex;
   justify-content: flex-end;

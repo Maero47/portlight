@@ -62,6 +62,13 @@
       </footer>
     </div>
     <div class="menu" id="menu" role="menu" hidden></div>
+    <div class="sheet-layer" id="sheet-layer" hidden>
+      <div class="sheet-scrim" id="sheet-scrim" data-act="sheet-dismiss" aria-hidden="true"></div>
+      <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" aria-describedby="sheet-desc" tabindex="-1">
+        <button class="icon-btn sheet-close" type="button" data-act="sheet-dismiss" aria-label="Close" title="Close  Esc"><span data-icon="xmark"></span></button>
+        <div class="sheet-content" id="sheet-content"></div>
+      </div>
+    </div>
     <div class="sr-only" id="announcer" aria-live="polite"></div>
     <script type="module" src="./popup/main.ts"></script>
   </body>

@@ -7,7 +7,8 @@ import {
   portTransport,
   type HostFailure,
 } from "../lib/host.ts";
-import { detectOs, installCommand, thisDevice, yourDevices } from "../lib/platform.ts";
+import { NODE_URL, detectOs, installPlan, installText as installLine, thisDevice, yourDevices, type InstallMethod } from "../lib/platform.ts";
+import { clearDismissal, loadDismissal, saveDismissal, shouldAutoOpen, type Dismissal, type SheetFailure } from "../lib/onboard.ts";
 import {
   busyPortCount,
   describeScope,
@@ -37,9 +38,10 @@ import { exposeHint, phoneUrl } from "../lib/phone.ts";
 import { qrSvg } from "../lib/qr.ts";
 import { tunnelRequest, type TunnelReply } from "../lib/tunnels.ts";
 import type { LanAddress, Listener, SettingsPane, Tunnel, TunnelProvider } from "../../../shared/protocol.ts";
-import { EXIT, QUICK, SETTLE, cancel, flip, heartbeat, measure, play, popIn, riseIn, roll, setReducedMotion, shake, sleepWhenHidden } from "../lib/motion.ts";
+import { EXIT, QUICK, SETTLE, cancel, motionReduced, flip, heartbeat, measure, play, popIn, riseIn, roll, setReducedMotion, shake, sleepWhenHidden } from "../lib/motion.ts";
 
-type Mode = "loading" | "host" | "missing" | "fallback" | "error";
+/** fallback: no helper (state.failure says why) or it failed; ports found over HTTP. */
+type Mode = "loading" | "host" | "fallback" | "error";
 type CheckState = "free" | "used" | "pending" | "unknown";
 
 interface Confirm {
@@ -82,9 +84,9 @@ const state = {
   rows: [] as PortRow[],
   stale: false,
   query: "",
-  failure: null as HostFailure | null,
+  /** Why the helper can't be used: drives the install sheet and the banner. */
+  failure: null as SheetFailure | null,
   error: "",
-  recheckFailed: false,
   confirm: null as Confirm | null,
   scanning: false,
   check: null as Check | null,
@@ -108,7 +110,18 @@ const state = {
   sharing: new Set<number>(),
   shareError: new Map<number, string>(),
   sweep: null as Sweep | null,
+  /** The install sheet. */
+  sheet: null as SheetState | null,
+  /** "Not now" from an earlier popup (lib/onboard.ts); undefined until storage answers. */
+  dismissal: undefined as Dismissal | null | undefined,
 };
+
+interface SheetState {
+  /** open: asking; checking: Check Again in flight; done: the helper just connected. */
+  phase: "open" | "checking" | "done";
+  /** A manual check that didn't find it. */
+  missed: boolean;
+}
 
 // ---------- DOM helpers ----------
 
@@ -331,11 +344,16 @@ function pushBadge() {
 
 let inflight: Promise<void> | null = null;
 
+/**
+ * Ask the helper for the list. Without a helper this is cheap (Chrome fails the connect without
+ * starting anything), so the HTTP fallback also calls it to notice the helper arriving.
+ */
 function refresh(): Promise<void> {
-  if (state.mode === "fallback") return Promise.resolve();
   inflight ??= (async () => {
     try {
       const [res] = await Promise.all([host.list(), refreshTabs(false)]);
+      const arrived = state.mode === "fallback";
+      if (arrived) leaveFallback();
       state.rows = shapeListeners(res.listeners);
       state.stale = false;
       state.mode = "host";
@@ -343,13 +361,29 @@ function refresh(): Promise<void> {
       state.failure = null;
       saveCache(res.listeners);
       pushBadge();
+      // Once per popup: the helper works, so any earlier "Not now" no longer applies.
+      if (state.dismissal !== null) {
+        state.dismissal = null;
+        void clearDismissal();
+      }
+      if (arrived) helperArrived();
     } catch (e) {
       if (e instanceof HostConnectionError && (e.kind === "missing" || e.kind === "forbidden")) {
-        state.mode = "missing";
+        const changed = state.failure !== e.kind;
         state.failure = e.kind;
-        state.rows = [];
-        saveCache(null);
-        setBadge(null);
+        if (state.mode !== "fallback") {
+          saveCache(null);
+          setBadge(null);
+          startFallback();
+        } else if (changed) {
+          render();
+        }
+        if (changed) renderSheet();
+        void maybeOpenSheet();
+        return;
+      } else if (state.mode === "fallback") {
+        // A helper that is there but misbehaving: stay on the HTTP list.
+        return;
       } else if (state.mode === "host" && !state.stale) {
         // A blip while live — keep the list, mark it stale, try again next tick.
         state.stale = true;
@@ -392,6 +426,11 @@ function fallbackPorts(): number[] {
 
 async function scanFallback(first = false) {
   if (state.mode !== "fallback") return;
+  // Every rescan also looks for the helper, so installing it turns the popup live by itself.
+  if (!first) {
+    await refresh();
+    if (state.mode !== "fallback") return;
+  }
   state.scanning = true;
   if (first) render();
   await refreshTabs(false);
@@ -399,6 +438,8 @@ async function scanFallback(first = false) {
   const seen = new Set<number>();
   await probePorts(fallbackPorts(), {
     onOpen: (r) => {
+      // The helper may have connected meanwhile; a late probe must not touch its list.
+      if (state.mode !== "fallback") return;
       seen.add(r.port);
       const row = probeToRow(r);
       const i = found.findIndex((x) => x.port === r.port);
@@ -421,19 +462,24 @@ async function scanFallback(first = false) {
 }
 
 function startFallback() {
+  clearTimeout(fallbackTimer);
   state.mode = "fallback";
   state.rows = [];
   state.confirm = null;
+  closeMenu(false);
   void scanFallback(true);
-  input.focus();
+  if (!state.sheet) input.focus();
 }
 
+/** The helper answered: drop the HTTP rows so the real list cascades in fresh. */
 function leaveFallback() {
   clearTimeout(fallbackTimer);
-  state.mode = "missing";
-  state.rows = [];
   state.scanning = false;
-  render();
+  state.rows = [];
+  state.confirm = null;
+  closeMenu(false);
+  renderList([], false);
+  firstPaint = true;
 }
 
 // ---------- port check & suggestion ----------
@@ -1433,49 +1479,12 @@ function extensionId(): string {
 }
 
 function installText(): string {
-  const { cmd, args } = installCommand(extensionId(), __PINNED_ID__);
-  return args ? `${cmd} ${args}` : cmd;
-}
-
-function onboardingHtml(): string {
-  const { cmd, args } = installCommand(extensionId(), __PINNED_ID__);
-  const forbidden = state.failure === "forbidden";
-  return `<div class="onboard">
-    <div class="onboard-head">
-      <div class="state-mark">${icon.plug(24)}</div>
-      <h2>${forbidden ? "Reconnect the helper" : "Connect the Portlight helper"}</h2>
-      <p>${
-        forbidden
-          ? "The helper is installed, but for a different extension ID. Run the installer again to allow this one."
-          : `Chrome can’t see which app owns a port. A small helper reads ${yourDevices()} listening ports and answers only this extension.`
-      }</p>
-    </div>
-    <ol class="steps">
-      <li class="step"><span class="step-n">1</span><div class="step-text">In the Portlight folder, run:
-        <div class="code"><code><span class="cmd">${esc(cmd)}</span>${args ? ` ${esc(args)}` : ""}</code>
-          <button class="icon-btn" type="button" data-act="copy-install" aria-label="Copy install command" title="Copy command">${icon.copy(15)}</button>
-        </div></div></li>
-      <li class="step"><span class="step-n">2</span><div class="step-text">Come back and check again. <span class="muted">No restart needed.</span></div></li>
-    </ol>
-    <div class="onboard-actions">
-      <button class="btn primary large" type="button" data-act="recheck">Check Again</button>
-      <button class="btn plain large" type="button" data-act="fallback">Scan common ports over HTTP</button>
-    </div>
-    <p class="onboard-note" role="status">${
-      state.recheckFailed ? "Still can’t reach the helper. Make sure the script finished without errors." : "Nothing leaves your computer."
-    }</p>
-  </div>`;
+  return installLine(extensionId(), OS);
 }
 
 function renderBody(animate: boolean) {
   bodyEl.setAttribute("aria-busy", String(state.mode === "loading" || state.scanning));
 
-  if (state.mode === "missing") {
-    renderList([], false);
-    showState(onboardingHtml(), "onboarding");
-    stateEl.className = "";
-    return;
-  }
   if (state.mode === "loading") {
     renderList([], false);
     if (state.showSkeleton) {
@@ -1555,9 +1564,6 @@ function renderChrome() {
     case "fallback":
       text = state.scanning && !state.rows.length ? "Scanning…" : `${plural(visibleCount(), "server")} · HTTP only`;
       break;
-    case "missing":
-      text = "Not connected";
-      break;
     default:
       text = "Unavailable";
   }
@@ -1572,9 +1578,15 @@ function renderChrome() {
   const banner = $("banner");
   if (state.mode === "fallback") {
     banner.hidden = false;
+    const why =
+      state.failure === "forbidden"
+        ? "The helper needs reconnecting."
+        : state.failure === "missing"
+          ? "The helper isn’t installed."
+          : "The helper isn’t answering.";
     setHtml(
       banner,
-      `${icon.waves(14)}<span><strong>HTTP only.</strong> Showing dev servers that answer on common ports. <button class="link" type="button" data-act="setup">Install the helper</button> to see every port and its app.</span>`,
+      `${icon.waves(14)}<span><strong>HTTP only.</strong> ${why}</span><button class="btn banner-btn" type="button" data-act="setup" aria-haspopup="dialog">${state.failure === "forbidden" ? "Fix…" : "Install…"}</button>`,
     );
   } else {
     banner.hidden = true;
@@ -1739,6 +1751,305 @@ function render(opts: { animate?: boolean } = {}) {
   renderCheck();
   renderFooter();
 }
+
+// ---------- install sheet ----------
+//
+// Without the helper the popup still works (HTTP fallback underneath); this sheet explains how to
+// add the helper, can be put away, and is reachable again from the banner. While it is open the
+// popup keeps asking for the helper, so it turns live by itself once the command has run.
+
+const sheetLayer = $("sheet-layer");
+const sheetEl = $("sheet");
+const sheetScrim = $("sheet-scrim");
+const sheetContent = $("sheet-content");
+const METHOD_KEY = "portlight.installMethod";
+const SHEET_POLL_MS = 2500;
+let sheetReturnFocus: HTMLElement | null = null;
+let sheetPoll: ReturnType<typeof setInterval> | undefined;
+let autoOpened = false;
+let installMethod: InstallMethod = loadMethod();
+
+function loadMethod(): InstallMethod {
+  try {
+    return localStorage.getItem(METHOD_KEY) === "brew" ? "brew" : "npm";
+  } catch {
+    return "npm";
+  }
+}
+
+function currentPlan() {
+  return installPlan(extensionId(), OS, { forbidden: state.failure === "forbidden" });
+}
+
+function codeHtml(cmd: string, what: string): string {
+  return `<div class="code"><code>${esc(cmd)}</code><button class="icon-btn" type="button" data-act="copy-cmd" data-cmd="${esc(cmd)}" aria-label="Copy ${what}" title="Copy command">${icon.copy(14)}</button></div>`;
+}
+
+function sheetFrameHtml(): string {
+  if (state.sheet?.phase === "done") {
+    return `<div class="sheet-done"><div class="sheet-mark">${icon.check(22)}</div>
+      <h2 id="sheet-title">Helper connected</h2><p id="sheet-desc">Every port on ${esc(DEVICE)}, with the app behind it.</p></div>`;
+  }
+  const forbidden = state.failure === "forbidden";
+  const plan = currentPlan();
+  const seg =
+    plan.choices.length > 1
+      ? `<div class="seg" role="radiogroup" aria-label="Install with">${plan.choices
+          .map((c) => `<button class="seg-opt" type="button" role="radio" data-act="sheet-method" data-method="${c.method}">${esc(c.label)}</button>`)
+          .join("")}<span class="seg-thumb" aria-hidden="true"></span></div>`
+      : "";
+  return `<div class="sheet-head">
+      <div class="sheet-mark">${icon.plug(18)}</div>
+      <h2 id="sheet-title">${forbidden ? "Reconnect the helper" : "Install the Portlight helper"}</h2>
+      <p class="sheet-desc" id="sheet-desc">${
+        forbidden
+          ? "The helper is installed, but for another copy of Portlight. Run the installer again to allow this one."
+          : `Chrome can’t see which app owns a port. A small helper reads ${esc(yourDevices())} listening ports and answers only this extension.`
+      } Nothing leaves your computer.</p>
+    </div>
+    <div class="sheet-how">${seg}<div class="sheet-how-body" id="sheet-how-body"></div></div>
+    <p class="sheet-status" id="sheet-status" role="status"></p>
+    <div class="sheet-actions">
+      <button class="btn large" type="button" data-act="sheet-dismiss">Not now</button>
+      <button class="btn primary large" type="button" data-act="sheet-recheck">Check Again</button>
+    </div>`;
+}
+
+function sheetHowHtml(): string {
+  const plan = currentPlan();
+  const choice = plan.choices.find((c) => c.method === installMethod) ?? plan.choices[0]!;
+  let html = "";
+  if (plan.nodeSetup) {
+    html = `<p class="sheet-step">In PowerShell or Command Prompt, run:</p>${codeHtml(choice.command, "install command")}
+      <p class="sheet-hint">Needs Node.js 18 or later. Don’t have it? Run this first:</p>${codeHtml(plan.nodeSetup, "Node.js install command")}`;
+  } else {
+    html = codeHtml(choice.command, "install command");
+    html +=
+      choice.method === "npm"
+        ? `<p class="sheet-hint">Needs Node.js 18 or later, from <button class="link" type="button" data-act="open-url" data-url="${NODE_URL}">nodejs.org</button>.</p>`
+        : `<p class="sheet-hint">Homebrew installs the helper, then it connects itself to Chrome.</p>`;
+  }
+  if (plan.devCommand && !plan.needsId) {
+    html += `<p class="sheet-hint dev">From a clone of the repo, <code>${esc(plan.devCommand)}</code> does the same.</p>`;
+  }
+  return html;
+}
+
+function renderSheet() {
+  const sh = state.sheet;
+  if (!sh) return;
+  const frame = sh.phase === "done" ? "done" : `ask|${state.failure}`;
+  if (sheetContent.dataset.frame !== frame) {
+    const hadFocus = sheetContent.contains(document.activeElement);
+    sheetContent.innerHTML = sheetFrameHtml();
+    sheetContent.dataset.frame = frame;
+    if (hadFocus) sheetEl.focus({ preventScroll: true });
+  }
+  sheetEl.classList.toggle("done", sh.phase === "done");
+  if (sh.phase === "done") return;
+
+  const seg = sheetContent.querySelector<HTMLElement>(".seg");
+  if (seg) {
+    const opts = [...seg.querySelectorAll<HTMLElement>(".seg-opt")];
+    const i = Math.max(0, opts.findIndex((o) => o.dataset.method === installMethod));
+    opts.forEach((o, j) => {
+      o.setAttribute("aria-checked", String(i === j));
+      o.tabIndex = i === j ? 0 : -1;
+    });
+    seg.style.setProperty("--i", String(i));
+  }
+  setHtml($("sheet-how-body"), sheetHowHtml());
+
+  const status = $("sheet-status");
+  const text =
+    sh.phase === "checking"
+      ? "Looking for the helper…"
+      : sh.missed
+        ? "Still can’t reach the helper. Make sure the command finished without errors."
+        : "Then come back: Portlight connects on its own. No restart needed.";
+  if (status.textContent !== text) status.textContent = text;
+  status.classList.toggle("error", sh.missed && sh.phase === "open");
+  const check = sheetContent.querySelector<HTMLElement>('[data-act="sheet-recheck"]')!;
+  const label = sh.phase === "checking" ? "Checking…" : "Check Again";
+  if (check.textContent !== label) check.textContent = label;
+  // aria-disabled, not disabled: a disabled button would drop focus out of the sheet.
+  check.setAttribute("aria-disabled", String(sh.phase === "checking"));
+}
+
+function openSheet() {
+  if (state.sheet) return;
+  closeMenu(false);
+  const a = document.activeElement;
+  sheetReturnFocus = a instanceof HTMLElement && a !== document.body ? a : null;
+  state.sheet = { phase: "open", missed: false };
+  sheetContent.dataset.frame = "";
+  sheetLayer.hidden = false;
+  app.inert = true;
+  renderSheet();
+  animateSheet(true);
+  (sheetContent.querySelector<HTMLElement>('[data-act="copy-cmd"]') ?? sheetEl).focus({ preventScroll: true });
+  clearInterval(sheetPoll);
+  sheetPoll = setInterval(() => {
+    if (document.visibilityState === "visible" && state.mode === "fallback") void refresh();
+  }, SHEET_POLL_MS);
+}
+
+/** remember: the user put it away ("Not now", close, Esc, outside), so don't open it by itself next time. */
+function closeSheet(remember: boolean) {
+  if (!state.sheet) return;
+  state.sheet = null;
+  clearInterval(sheetPoll);
+  app.inert = false;
+  if (remember && state.failure) {
+    state.dismissal = { at: Date.now(), failure: state.failure };
+    void saveDismissal(state.failure);
+  }
+  animateSheet(false);
+  const back = sheetReturnFocus;
+  sheetReturnFocus = null;
+  if (back?.isConnected && !back.closest("[hidden]")) back.focus({ preventScroll: true });
+  else input.focus({ preventScroll: true });
+}
+
+/**
+ * Rises from the bottom edge on the SETTLE spring; leaves quicker on the exit curve. Starts from
+ * wherever a running animation has it, so closing mid-open (or the reverse) never jumps.
+ * Reduced motion: a short fade only.
+ */
+function animateSheet(open: boolean) {
+  const moving = sheetEl.getAnimations().some((x) => x.id === "sheet");
+  const from = { opacity: getComputedStyle(sheetLayer).opacity, transform: getComputedStyle(sheetEl).transform };
+  for (const el of [sheetEl, sheetScrim, sheetLayer]) cancel(el, "sheet");
+  const finish = () => {
+    if (state.sheet) return;
+    sheetLayer.hidden = true;
+    sheetContent.innerHTML = "";
+    sheetContent.dataset.frame = "";
+  };
+  const tag = (x: Animation | null) => {
+    if (x) x.id = "sheet";
+    return x;
+  };
+  if (motionReduced()) {
+    let fade: Animation | null = null;
+    try {
+      fade = sheetLayer.animate(
+        [{ opacity: moving ? from.opacity : open ? 0 : 1 }, { opacity: open ? 1 : 0 }],
+        { duration: open ? 160 : 120, easing: "ease-out", fill: open ? "none" : "forwards" },
+      );
+    } catch {
+      /* detached */
+    }
+    tag(fade);
+    if (open) return;
+    if (fade) fade.finished.then(finish, finish);
+    else finish();
+    return;
+  }
+  const away = `translateY(${sheetEl.offsetHeight + 16}px)`;
+  const start = moving && from.transform !== "none" ? from.transform : open ? away : "none";
+  if (open) {
+    tag(play(sheetEl, [{ transform: start }, { transform: "none" }], SETTLE));
+    tag(play(sheetScrim, [{ opacity: 0 }, { opacity: 1 }], { duration: 240, easing: "ease-out" }));
+    return;
+  }
+  const out = tag(play(sheetEl, [{ transform: start }, { transform: away }], { ...EXIT, duration: 240, fill: "forwards" }));
+  tag(play(sheetScrim, [{ opacity: getComputedStyle(sheetScrim).opacity }, { opacity: 0 }], { ...EXIT, duration: 220, fill: "forwards" }));
+  if (out) out.finished.then(finish, finish);
+  else finish();
+}
+
+/** Open by itself on the first failure of this popup, unless it was put away recently (lib/onboard.ts). */
+async function maybeOpenSheet() {
+  if (autoOpened || state.sheet) return;
+  if (state.dismissal === undefined) state.dismissal = await loadDismissal();
+  const f = state.failure;
+  if (autoOpened || state.sheet || state.mode !== "fallback" || !f) return;
+  if (!shouldAutoOpen(state.dismissal ?? null, f)) return;
+  autoOpened = true;
+  openSheet();
+}
+
+async function recheckFromSheet() {
+  if (state.sheet?.phase !== "open") return;
+  state.sheet = { phase: "checking", missed: false };
+  renderSheet();
+  const started = performance.now();
+  await refresh();
+  // Long enough to read "Checking…", so a quick "not found" doesn't look like nothing happened.
+  const wait = 450 - (performance.now() - started);
+  if (wait > 0 && state.sheet?.phase === "checking") await new Promise((r) => setTimeout(r, wait));
+  if (state.sheet?.phase !== "checking") return;
+  state.sheet = { phase: "open", missed: true };
+  renderSheet();
+  shake($("sheet-status"));
+}
+
+function setInstallMethod(m: InstallMethod, focus = false) {
+  installMethod = m;
+  try {
+    localStorage.setItem(METHOD_KEY, m);
+  } catch {
+    /* remembered until the popup closes */
+  }
+  renderSheet();
+  if (focus) sheetContent.querySelector<HTMLElement>(`.seg-opt[data-method="${m}"]`)?.focus();
+}
+
+/** The helper answered while the popup was on the HTTP fallback. */
+function helperArrived() {
+  if (!state.sheet) {
+    announce("Helper connected. Showing every port.");
+    return;
+  }
+  state.sheet = { phase: "done", missed: false };
+  renderSheet();
+  const mark = sheetContent.querySelector(".sheet-mark");
+  if (mark) popIn(mark, 0.6);
+  sheetEl.focus({ preventScroll: true });
+  announce("Helper connected. Showing every port.");
+  setTimeout(() => {
+    if (state.sheet?.phase === "done") closeSheet(false);
+  }, motionReduced() ? 700 : 1100);
+}
+
+function sheetFocusables(): HTMLElement[] {
+  return [...sheetEl.querySelectorAll<HTMLElement>("button, [href], input, [tabindex]")].filter(
+    (el) => el.tabIndex >= 0 && !el.closest("[hidden]") && el.getClientRects().length > 0,
+  );
+}
+
+/** Keys while the sheet is open: it is modal, so nothing reaches the list underneath. */
+function sheetKeys(e: KeyboardEvent) {
+  const sh = state.sheet!;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeSheet(sh.phase !== "done");
+    return;
+  }
+  if (e.key === "Tab") {
+    const els = sheetFocusables();
+    if (!els.length) return;
+    const i = els.indexOf(document.activeElement as HTMLElement);
+    e.preventDefault();
+    const next = i < 0 ? (e.shiftKey ? els.length - 1 : 0) : (i + (e.shiftKey ? -1 : 1) + els.length) % els.length;
+    els[next]!.focus();
+    return;
+  }
+  const t = e.target as HTMLElement;
+  if (t.classList.contains("seg-opt") && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) {
+    e.preventDefault();
+    const opts = [...sheetContent.querySelectorAll<HTMLElement>(".seg-opt")];
+    const i = opts.indexOf(t);
+    const n = opts[(i + (e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1) + opts.length) % opts.length]!;
+    setInstallMethod(n.dataset.method as InstallMethod, true);
+  }
+}
+
+// The popup can also be open in a tab or a detached window: look again when it comes back.
+addEventListener("focus", () => {
+  if (state.mode === "fallback") void refresh();
+});
 
 // ---------- row menu ----------
 
@@ -2030,28 +2341,20 @@ document.addEventListener("click", async (e) => {
     case "open-port":
       await openPort(Number(btn.dataset.port));
       break;
-    case "copy-install": {
-      if (await copyText(installText())) {
-        flashDone(btn, btn, 15);
-        announce("Install command copied");
-      }
-      break;
-    }
-    case "recheck": {
-      btn.setAttribute("disabled", "");
-      state.recheckFailed = false;
-      await refresh();
-      if (state.mode === "missing") {
-        state.recheckFailed = true;
-        render();
-      }
-      break;
-    }
     case "fallback":
       startFallback();
       break;
     case "setup":
-      leaveFallback();
+      openSheet();
+      break;
+    case "sheet-dismiss":
+      if (state.sheet) closeSheet(state.sheet.phase !== "done");
+      break;
+    case "sheet-recheck":
+      await recheckFromSheet();
+      break;
+    case "sheet-method":
+      setInstallMethod(btn.dataset.method as InstallMethod);
       break;
     case "retry":
       state.mode = "loading";
@@ -2146,6 +2449,10 @@ function menuKeys(e: KeyboardEvent): boolean {
 }
 
 document.addEventListener("keydown", (e) => {
+  if (state.sheet) {
+    sheetKeys(e);
+    return;
+  }
   if (menuKeys(e)) return;
   const target = e.target as HTMLElement;
   const inSearch = target === input;
@@ -2170,7 +2477,7 @@ document.addEventListener("keydown", (e) => {
     else if (state.query) {
       setQuery("");
       input.focus();
-    } else if (!inSearch && state.mode !== "missing") input.focus();
+    } else if (!inSearch) input.focus();
     else window.close();
     return;
   }
@@ -2260,5 +2567,6 @@ const unwatchTabs = watchTabs(() => void refreshTabs());
 addEventListener("pagehide", () => {
   clearInterval(loop);
   clearTimeout(fallbackTimer);
+  clearInterval(sheetPoll);
   unwatchTabs();
 });
