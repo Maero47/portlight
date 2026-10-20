@@ -24,12 +24,25 @@ portlight-host install
 
 Then reload the Portlight extension (or reopen its popup).
 
+This version of the helper doesn't know the Chrome Web Store build's ID yet. If you
+installed Portlight from the store, the popup shows the install command with
+`--extension-id <id>` already filled in. You can also copy the ID from
+`chrome://extensions` and run:
+
+```sh
+npx portlight-host install --extension-id <id>
+```
+
 The installer copies the helper to a folder in your home directory, writes a launcher
 that points at the exact `node` it was run with, and registers the helper with every
 Chromium browser it finds: Chrome (stable, Beta, Dev, Canary), Chromium, Brave, Edge,
-Arc and Vivaldi. It then starts the installed copy once to check that it answers. It
-needs no admin rights, prints every file and registry key it writes, and is safe to run
-again.
+Arc and Vivaldi. It starts the installed copy once to check that it answers before
+registering it anywhere. It needs no admin rights, prints every file and registry key
+it writes, and is safe to run again.
+
+On Linux, browsers installed as a Snap or Flatpak run in a sandbox that can't start
+native helpers. The installer says so when it finds one and leaves it alone; use the
+browser's regular package for Portlight.
 
 | OS      | Helper files                                   | Registered in                                       |
 | ------- | ---------------------------------------------- | --------------------------------------------------- |

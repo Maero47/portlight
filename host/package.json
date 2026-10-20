@@ -5,7 +5,7 @@
   "keywords": ["portlight", "localhost", "ports", "native-messaging", "chrome-extension", "dev-server"],
   "type": "module",
   "bin": { "portlight-host": "src/main.js" },
-  "files": ["src/*.js", "scripts/frame.js", "install.ps1", "README.md"],
+  "files": ["src/*.js", "scripts/frame.js", "install.ps1", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "os": ["darwin", "linux", "win32"],
   "repository": { "type": "git", "url": "git+https://github.com/Maero47/LocalHoster.git", "directory": "host" },

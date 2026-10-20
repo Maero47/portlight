@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { encode } from "./framing.js";
-import { DEFAULT_EXTENSION_IDS, idOfOrigin, isExtensionId, originOf } from "./ids.js";
+import { DEFAULT_EXTENSION_IDS, STORE_EXTENSION_ID, idOfOrigin, isExtensionId, originOf } from "./ids.js";
 import { HOST_NAME } from "./protocol.js";
 
 const DESCRIPTION = "Portlight: reports which localhost ports are in use";
@@ -109,6 +109,26 @@ export function locations(ctx) {
 
 function fileBrowser(label, profile) {
   return { label, profiles: [profile], manifest: path.join(profile, "NativeMessagingHosts", `${HOST_NAME}.json`) };
+}
+
+/**
+ * Linux browsers from Snap or Flatpak. Their sandbox can't start native messaging hosts,
+ * so the installer only mentions them and writes nothing there.
+ */
+export function sandboxedBrowsers(ctx) {
+  const snaps = [["Chromium (Snap)", "chromium"], ["Brave (Snap)", "brave"]];
+  const flatpaks = [
+    ["Chromium (Flatpak)", "org.chromium.Chromium"],
+    ["Ungoogled Chromium (Flatpak)", "io.github.ungoogled_software.ungoogled_chromium"],
+    ["Google Chrome (Flatpak)", "com.google.Chrome"],
+    ["Brave (Flatpak)", "com.brave.Browser"],
+    ["Microsoft Edge (Flatpak)", "com.microsoft.Edge"],
+    ["Vivaldi (Flatpak)", "com.vivaldi.Vivaldi"],
+  ];
+  return [
+    ...snaps.filter(([, n]) => fs.existsSync(path.join(ctx.home, "snap", n))),
+    ...flatpaks.filter(([, id]) => fs.existsSync(path.join(ctx.home, ".var", "app", id))),
+  ].map(([label]) => label);
 }
 
 const isInstalled = (b) => b.profiles.some((p) => fs.existsSync(p));
@@ -299,7 +319,12 @@ export function install(ctx, { ids: extra = [], allBrowsers = false } = {}) {
     ctx.log(line("removed", oldBat));
   }
 
-  // 3. Register with each browser.
+  // 3. The installed copy must answer before any browser is pointed at it.
+  const ping = ctx.ping(ctx, loc.launcher, originOf(ids[0]));
+  if (!ping.ok) throw new InstallError(`the installed host did not answer a ping:\n${ping.error}`);
+  ctx.log(line("verified", "host answers ping"));
+
+  // 4. Register with each browser.
   const manifest = manifestJson(loc.launcher, ids);
   const registered = [];
   if (ctx.platform === "win32") {
@@ -330,15 +355,23 @@ export function install(ctx, { ids: extra = [], allBrowsers = false } = {}) {
     }
   }
 
-  // 4. The installed copy must answer, or the extension would only say "not found" later.
-  const ping = ctx.ping(ctx, loc.launcher, originOf(ids[0]));
-  if (!ping.ok) throw new InstallError(`the installed host did not answer a ping:\n${ping.error}`);
-  ctx.log(line("verified", "host answers ping"));
+
+  if (ctx.platform === "linux") {
+    const found = sandboxedBrowsers(ctx);
+    if (found.length) {
+      ctx.log(line("note", `${found.join(", ")} run in a sandbox (Snap/Flatpak) that can't start native helpers; use a non-sandboxed build for Portlight`));
+    }
+  }
 
   ctx.log("");
   ctx.log("Manifest:");
   for (const l of manifest.trimEnd().split("\n")) ctx.log(`  ${l}`);
   ctx.log("");
+  if (!STORE_EXTENSION_ID && extra.length === 0) {
+    ctx.log("Installed Portlight from the Chrome Web Store? Allow its ID too (shown in chrome://extensions):");
+    ctx.log("  portlight-host install --extension-id <id>");
+    ctx.log("");
+  }
   return { ids, browsers: registered, ping, launcher: loc.launcher, installDir: loc.installDir };
 }
 

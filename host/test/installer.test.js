@@ -512,3 +512,64 @@ test("win32: the registry default value is read whatever the localised label", a
 test("unsupported platforms are refused", () => {
   assert.throws(() => locations(ctxFor("aix", os.tmpdir())), /unsupported platform: aix/);
 });
+
+// ------------------------------------------------------------------ polish
+
+test("a host that doesn't answer is never registered with a browser", { skip: !posix }, () => {
+  const home = tempHome();
+  try {
+    const ctx = ctxFor("darwin", home, { ping: () => ({ ok: false, error: "boom" }) });
+    const loc = locations(ctx);
+    fs.mkdirSync(loc.browsers.find((b) => b.label === "Chromium").profiles[0], { recursive: true });
+    assert.throws(() => install(ctx, {}), /did not answer a ping/);
+    for (const b of loc.browsers) assert.equal(fs.existsSync(b.manifest), false, b.label);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("win32: a host that doesn't answer gets no registry keys", () => {
+  const home = tempHome();
+  try {
+    const ctx = winCtx(home, { ping: () => ({ ok: false, error: "boom" }) });
+    assert.throws(() => install(ctx, { allBrowsers: true }), /did not answer a ping/);
+    assert.equal(ctx.regState.keys.size, 0);
+    assert.ok(!ctx.regState.calls.some((c) => c[0] === "add"));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("linux: Snap and Flatpak browsers get a note and nothing written", { skip: !posix }, () => {
+  const home = tempHome();
+  try {
+    fs.mkdirSync(path.join(home, "snap/chromium"), { recursive: true });
+    fs.mkdirSync(path.join(home, ".var/app/com.brave.Browser"), { recursive: true });
+    const ctx = ctxFor("linux", home);
+    install(ctx, { allBrowsers: true });
+    assert.match(ctx.text(), /note +Chromium \(Snap\), Brave \(Flatpak\) run in a sandbox/);
+    assert.deepEqual(fs.readdirSync(path.join(home, "snap/chromium")), []);
+    assert.deepEqual(fs.readdirSync(path.join(home, ".var/app/com.brave.Browser")), []);
+
+    const plain = ctxFor("linux", tempHome());
+    install(plain, { allBrowsers: true });
+    assert.doesNotMatch(plain.text(), /sandbox/);
+    fs.rmSync(plain.home, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("until the store ID is known, install points store users at --extension-id", { skip: !posix || Boolean(STORE_EXTENSION_ID) }, () => {
+  const home = tempHome();
+  try {
+    const ctx = ctxFor("darwin", home);
+    install(ctx, { allBrowsers: true });
+    assert.match(ctx.text(), /Chrome Web Store\?.*\n {2}portlight-host install --extension-id <id>/);
+    ctx.clear();
+    install(ctx, { allBrowsers: true, ids: [OTHER] });
+    assert.doesNotMatch(ctx.text(), /Chrome Web Store\?/, "not when an ID was just given");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
