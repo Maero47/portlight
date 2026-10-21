@@ -3,7 +3,9 @@
 See which localhost ports are in use, by which project, and which are free, from a
 Chrome toolbar button.
 
-![Portlight popup listing six dev servers with their projects and tools](assets/store/screenshot-1-ports-1280x800.png)
+[![Portlight checking port 3000, copying the nearest free port, and quitting a stray dev server](assets/video/portlight-demo.gif)](assets/video/portlight-launch.mp4)
+
+[Watch the 34-second launch video with sound](assets/video/portlight-launch.mp4)
 
 - Every listener, with its port, project folder, recognised tool (Vite, Next.js, Uvicorn…), process and
   uptime. Servers reachable from your network are marked.

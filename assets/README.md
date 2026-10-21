@@ -49,3 +49,8 @@ informed simplicity and restrained depth;
 to a clear silhouette. These are design references, not source artwork.
 [Chrome's image guidance](https://developer.chrome.com/docs/webstore/images/)
 informed the store dimensions and dark promotional background.
+
+`video/portlight-launch.mp4` is the launch video (1920×1080, 34 s, with music).
+`video/portlight-demo.gif` is an 18-second silent cut of its demo section for the
+main README. The popup in the video is rebuilt from the extension's own styles and
+icons and animated frame by frame, so every label matches the real interface.
